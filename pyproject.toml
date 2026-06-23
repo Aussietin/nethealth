@@ -12,9 +12,7 @@ dependencies = [
     "rich",
     "httpx",
     "dnspython",
-    "fastapi",
-    "uvicorn",
-    "jinja2",
+    "textual",
 ]
 
 [project.scripts]

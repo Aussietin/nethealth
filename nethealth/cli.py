@@ -276,3 +276,13 @@ def monitor_ping_cmd(targets, interval, duration, log_dir):
         console.print("\n[green]✅ Statistics collection complete.[/green]")
     else:
         console.print("\n[yellow]🛑 Session ended early by user.[/yellow]")
+
+
+@cli.command()
+@click.argument("targets", nargs=-1, metavar="[TARGET]...")
+def tui(targets):
+    """Live network health monitor (Textual TUI). Press q to quit, r to refresh, t to add a target."""
+    from nethealth.tui import run_tui
+
+    target_list = list(targets) if targets else ["google.com", "1.1.1.1"]
+    run_tui(target_list)
