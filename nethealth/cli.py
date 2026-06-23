@@ -286,3 +286,118 @@ def tui(targets):
 
     target_list = list(targets) if targets else ["google.com", "1.1.1.1"]
     run_tui(target_list)
+
+
+@cli.command()
+@click.option("--size", default=10, show_default=True, type=int, help="Download size in MB (10 or 25 recommended)")
+@click.option("--json", "output_json", is_flag=True, help="Output raw JSON")
+def speed(size, output_json):
+    """Download speed test via Cloudflare."""
+    from nethealth.checks.speed import speed_check
+
+    if not output_json:
+        console.print(f"\n⚡ [bold]Speed test[/bold] — downloading {size} MB from Cloudflare...\n")
+
+    result = speed_check(size_mb=size)
+
+    if output_json:
+        import json as _json
+        click.echo(_json.dumps(result, indent=2))
+        return
+
+    if result["status"] == "ok":
+        mbps = result["mbps"]
+        latency = result.get("latency_ms")
+        elapsed = result["elapsed_s"]
+        color = "green" if mbps >= 50 else ("yellow" if mbps >= 10 else "red")
+        console.print(f"  [{color}]⬇  {mbps:.1f} Mbps[/{color}]")
+        if latency is not None:
+            console.print(f"  [dim]Latency to first byte: {latency:.0f} ms[/dim]")
+        console.print(f"  [dim]Downloaded {result['bytes'] / 1_000_000:.1f} MB in {elapsed:.1f} s[/dim]\n")
+    else:
+        console.print(f"  [red]❌ Speed test failed:[/red] {result.get('error', 'unknown error')}\n")
+
+
+@cli.command()
+def wifi():
+    """Show WiFi interface, SSID, signal strength, and band."""
+    from nethealth.checks.wifi import wifi_check
+
+    result = wifi_check()
+
+    if result["status"] != "ok":
+        console.print(f"\n[red]❌ WiFi:[/red] {result.get('error', 'unknown error')}\n")
+        return
+
+    console.print()
+    if not result.get("connected"):
+        note = result.get("note", "Not connected")
+        ifaces = result.get("interfaces", [])
+        console.print(f"  [yellow]⚠  WiFi:[/yellow] {note}")
+        if ifaces:
+            console.print(f"  [dim]Interfaces: {', '.join(ifaces)}[/dim]")
+        console.print()
+        return
+
+    iface = result.get("interface", "?")
+    ssid = result.get("ssid", "?")
+    dbm = result.get("signal_dbm")
+    quality = result.get("signal_quality", "?")
+    band = result.get("band", "?")
+    tx = result.get("tx_mbps")
+
+    sig_color = {"excellent": "green", "good": "green", "fair": "yellow", "poor": "red"}.get(quality, "white")
+
+    console.print(f"  📶 [bold]{ssid}[/bold]  [dim]({iface})[/dim]")
+    if dbm is not None:
+        console.print(f"  Signal : [{sig_color}]{dbm:.0f} dBm — {quality}[/{sig_color}]")
+    console.print(f"  Band   : {band}")
+    if tx:
+        console.print(f"  TX rate: {tx:.0f} Mbps")
+    console.print()
+
+
+@cli.command()
+@click.option("--target", default=None, help="Filter by target hostname/IP")
+@click.option("--last", default=None, type=int, help="Only use the last N check runs")
+@click.option("--json", "output_json", is_flag=True, help="Output raw JSON")
+def report(target, last, output_json):
+    """Summary report from saved check history (~/.nethealth/history.json)."""
+    from nethealth.report import generate_report
+    import json as _json
+
+    data = generate_report(target=target, last=last)
+
+    if output_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    if data["status"] == "empty":
+        console.print(f"\n[yellow]⚠  {data['message']}[/yellow]\n")
+        return
+
+    dr = data["date_range"]
+    console.print(f"\n[bold cyan]📊  nethealth report[/bold cyan]  [dim]{dr[0]} → {dr[1]}[/dim]  ({data['entries_total']} runs)\n")
+
+    for tgt, checks in data["per_target"].items():
+        console.print(f"[bold]{tgt}[/bold]")
+        table = Table(box=box.SIMPLE, show_header=True, header_style="dim", pad_edge=False)
+        table.add_column("Check",   width=8)
+        table.add_column("Pass%",   width=7)
+        table.add_column("Avg ms",  width=9)
+        table.add_column("Min ms",  width=9)
+        table.add_column("Max ms",  width=9)
+
+        for check_name, stats in checks.items():
+            pct = stats["pass_pct"]
+            pct_color = "green" if pct == 100 else ("yellow" if pct >= 80 else "red")
+            avg = str(stats.get("avg_ms") or stats.get("avg_latency_ms") or "—")
+            mn  = str(stats.get("min_ms") or stats.get("min_latency_ms") or "—")
+            mx  = str(stats.get("max_ms") or stats.get("max_latency_ms") or "—")
+            table.add_row(
+                check_name.upper(),
+                f"[{pct_color}]{pct}%[/{pct_color}]",
+                avg, mn, mx,
+            )
+        console.print(table)
+        console.print()

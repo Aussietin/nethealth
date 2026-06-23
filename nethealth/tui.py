@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 from typing import ClassVar
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -29,23 +30,28 @@ from nethealth.checks.ping import ping_check
 from nethealth.checks.port import port_check
 
 MAX_SPARKLINE_POINTS = 60
-REFRESH_INTERVAL = 30  # seconds between auto-refreshes
+REFRESH_INTERVAL = 30
 
-_COL_TARGET = "Target"
-_COL_DNS = "DNS"
-_COL_PING = "Ping"
-_COL_HTTP = "HTTP"
-_COL_PORT = "Port"
+_COL_TARGET  = "Target"
+_COL_DNS     = "DNS"
+_COL_PING    = "Ping"
+_COL_HTTP    = "HTTP"
+_COL_PORT    = "Port"
 _COL_UPDATED = "Updated"
+
+
+def _cell(text: str, ok: bool | None) -> Text:
+    """Rich Text with green/red/dim styling for DataTable cells."""
+    if ok is None:
+        return Text(text, style="dim")
+    return Text(text, style="green" if ok else "red")
 
 
 class AddTargetScreen(ModalScreen):
     """Floating dialog to add a new monitoring target."""
 
     DEFAULT_CSS = """
-    AddTargetScreen {
-        align: center middle;
-    }
+    AddTargetScreen { align: center middle; }
     #dialog {
         background: $surface;
         border: solid $accent;
@@ -53,9 +59,7 @@ class AddTargetScreen(ModalScreen):
         width: 52;
         height: 7;
     }
-    #dialog Label {
-        margin-bottom: 1;
-    }
+    #dialog Label { margin-bottom: 1; }
     """
 
     def compose(self) -> ComposeResult:
@@ -88,36 +92,28 @@ class NetHealthTUI(App):
     ]
 
     DEFAULT_CSS = """
-    #main {
-        height: 1fr;
-    }
+    #main { height: 1fr; }
     #left {
         width: 58%;
         border-right: solid $primary-darken-2;
     }
-    #right {
-        width: 42%;
-    }
+    #right { width: 42%; }
     .panel-title {
         background: $primary-darken-3;
         padding: 0 1;
         color: $text;
         text-style: bold;
     }
-    DataTable {
-        height: 1fr;
-    }
+    DataTable { height: 1fr; }
     #spark-scroll {
         height: 1fr;
         padding: 0 1;
     }
     Sparkline {
         height: 5;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
-    .spark-label {
-        color: $text-muted;
-    }
+    .spark-label { margin-top: 1; }
     #log {
         height: 12;
         border-top: solid $primary-darken-2;
@@ -129,6 +125,9 @@ class NetHealthTUI(App):
         self._targets: list[str] = list(targets)
         self._latency: dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_SPARKLINE_POINTS))
         self._sparklines: dict[str, Sparkline] = {}
+        self._spark_labels: dict[str, Label] = {}
+        # packet loss tracking: {target: [sent, ok]}
+        self._ping_stats: dict[str, list[int]] = defaultdict(lambda: [0, 0])
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -149,11 +148,11 @@ class NetHealthTUI(App):
             table.add_column(col, key=col)
 
         for target in self._targets:
-            table.add_row(target, "—", "—", "—", "—", "—", key=target)
+            table.add_row(target, _cell("—", None), _cell("—", None), _cell("—", None), _cell("—", None), "—", key=target)
             self._mount_sparkline(target)
 
         self._log(f"[cyan]nethealth TUI started[/cyan] — watching {len(self._targets)} target(s)")
-        self._log("[dim]Auto-refresh every 30 s. Press [b]r[/b] to refresh now, [b]t[/b] to add a target.[/dim]")
+        self._log("[dim]Auto-refresh every 30 s · [b]r[/b] refresh · [b]t[/b] add target · [b]q[/b] quit[/dim]")
         self.set_interval(REFRESH_INTERVAL, self.action_refresh)
         self.action_refresh()
 
@@ -162,8 +161,11 @@ class NetHealthTUI(App):
         label = Label(f"[dim]{target}[/dim]", classes="spark-label")
         spark = Sparkline([], summary_function=max)
         self._sparklines[target] = spark
+        self._spark_labels[target] = label
         scroll.mount(label)
         scroll.mount(spark)
+
+    # ── Actions ───────────────────────────────────────────────────────────────
 
     def action_refresh(self) -> None:
         for target in self._targets:
@@ -174,7 +176,11 @@ class NetHealthTUI(App):
             if not result or result in self._targets:
                 return
             self._targets.append(result)
-            self.query_one(DataTable).add_row(result, "—", "—", "—", "—", "—", key=result)
+            self.query_one(DataTable).add_row(
+                result,
+                _cell("—", None), _cell("—", None), _cell("—", None), _cell("—", None), "—",
+                key=result,
+            )
             self._latency[result]
             self._mount_sparkline(result)
             self._log(f"[green]Added target:[/green] {result}")
@@ -182,9 +188,10 @@ class NetHealthTUI(App):
 
         self.push_screen(AddTargetScreen(), on_dismiss)
 
+    # ── Worker ────────────────────────────────────────────────────────────────
+
     @work(thread=True)
     def _run_checks(self, target: str) -> None:
-        self.call_from_thread(self._log, f"[dim]Checking {target}...[/dim]")
         try:
             dns_r  = dns_check(target)
             ping_r = ping_check(target)
@@ -203,24 +210,39 @@ class NetHealthTUI(App):
         http_r: dict,
         port_r: dict,
     ) -> None:
-        if ping_r["status"] == "ok" and ping_r.get("avg_ms") is not None:
-            self._latency[target].append(ping_r["avg_ms"])
+        def _ok(r: dict) -> bool:
+            return r["status"] == "ok"
+
+        # Ping stats + sparkline
+        stats = self._ping_stats[target]
+        stats[0] += 1  # sent
+        ping_ok = _ok(ping_r)
+        if ping_ok:
+            stats[1] += 1  # received
+        loss_pct = (1 - stats[1] / stats[0]) * 100 if stats[0] else 0.0
+
+        avg = ping_r.get("avg_ms")
+        if ping_ok and avg is not None:
+            self._latency[target].append(avg)
             spark = self._sparklines.get(target)
             if spark is not None:
                 spark.data = list(self._latency[target])
 
-        def _ok(r: dict) -> bool:
-            return r["status"] == "ok"
+        # Update sparkline label with live stats
+        label = self._spark_labels.get(target)
+        if label is not None:
+            loss_color = "green" if loss_pct == 0 else ("yellow" if loss_pct < 10 else "red")
+            ms_part = f"  {avg:.0f} ms" if (ping_ok and avg is not None) else ""
+            label.update(
+                f"[dim]{target}[/dim]{ms_part}  [{loss_color}]loss {loss_pct:.0f}%[/{loss_color}]"
+            )
 
-        def _icon(r: dict) -> str:
-            return "OK" if _ok(r) else "FAIL"
-
-        dns_cell  = (f"OK {dns_r.get('latency', 0):.0f}ms") if _ok(dns_r) else "FAIL"
-        avg = ping_r.get("avg_ms")
-        ping_cell = (f"OK {avg:.0f}ms" if avg is not None else "OK") if _ok(ping_r) else "FAIL"
-        http_cell = (f"OK {http_r.get('code', '?')}") if _ok(http_r) else "FAIL"
+        # Build coloured cells
+        dns_cell  = _cell(f"{dns_r.get('latency', 0):.0f} ms", _ok(dns_r)) if _ok(dns_r) else _cell("FAIL", False)
+        ping_cell = _cell(f"{avg:.0f} ms  loss {loss_pct:.0f}%", ping_ok) if (ping_ok and avg is not None) else _cell("FAIL", False)
+        http_cell = _cell(f"{http_r.get('code', '?')}", _ok(http_r)) if _ok(http_r) else _cell("FAIL", False)
         open_ports = [str(x["port"]) for x in port_r.get("results", []) if x["status"] == "open"]
-        port_cell = (f"OK {','.join(open_ports)}") if open_ports else "CLOSED"
+        port_cell = _cell(",".join(open_ports), True) if open_ports else _cell("closed", False)
         now = datetime.now().strftime("%H:%M:%S")
 
         table = self.query_one(DataTable)
@@ -230,10 +252,17 @@ class NetHealthTUI(App):
         table.update_cell(target, _COL_PORT,    port_cell, update_width=True)
         table.update_cell(target, _COL_UPDATED, now,       update_width=True)
 
+        icons = "".join(
+            "✓" if _ok(r) else "✗"
+            for r in [dns_r, ping_r, http_r, port_r]
+        )
+        all_ok = all(_ok(r) for r in [dns_r, ping_r, http_r, port_r])
+        color = "green" if all_ok else "red"
         self._log(
-            f"[bold]{target}[/bold]  "
-            f"DNS:{_icon(dns_r)} Ping:{_icon(ping_r)} HTTP:{_icon(http_r)} Port:{_icon(port_r)}"
-            f"  [dim]{now}[/dim]"
+            f"[{color}]{icons}[/{color}] [bold]{target}[/bold]"
+            + (f"  ping {avg:.0f} ms" if (ping_ok and avg is not None) else "")
+            + (f"  loss {loss_pct:.0f}%" if stats[0] > 1 else "")
+            + f"  [dim]{now}[/dim]"
         )
 
     def _log(self, msg: str) -> None:
