@@ -1,183 +1,167 @@
 # nethealth
 
-**nethealth** is a lightweight, extensible diagnostic tool for assessing **network health and stability**.
+A personal network health diagnostic tool for the terminal. Run one-shot checks, get a live monitoring TUI, test your download speed, and generate reports — no browser, no server, no setup friction.
 
-It performs common diagnostics — **DNS resolution**, **ICMP reachability**, **HTTP connectivity**, **TCP port checks**, **Traceroute**, and **long-running concurrent ping monitoring**.
-
-The tool now features a **High-Performance Web Dashboard** with a **Cyberpunk Retheme**, offering real-time visual diagnostics.
-
-The tool is designed to be:
-
-✅ **Fast and unpredictable** (no hanging)  
-✅ **Human‑readable** CLI & Web Dashboard  
-✅ **Script‑friendly** and extensible  
-✅ **Safe to run** without root privileges
-
-***
-
-## Features
-
-### ✅ Snapshot Health Checks
-
-*   **DNS health check**: Verifies name resolution and measures lookup latency.
-*   **Ping (ICMP) check**: Uses system `ping` to report average round‑trip time.
-*   **HTTP connectivity check**: HTTPS request with strict timeout.
-*   **Port Reachability**: Verifies TCP port connectivity (default: 22, 80, 443).
-*   **Traceroute**: Identifies network path and per-hop latency.
-*   **Raw Traceroute (advanced)**: Uses TTL-based ICMP/UDP probing on Linux to map the router path directly from Python when raw sockets are available.
-*   **Packet Sniffer**: Captures Ethernet frames and parses IPv4/TCP/UDP/ICMP headers on Linux using `AF_PACKET`.
-
-### ✅ Long‑Running Monitoring
-
-*   **Concurrent Multi‑target ping monitoring**:
-    *   Monitors multiple targets simultaneously using thread pools.
-    *   Timestamped logs (one per target).
-    *   **Premium Shutdown**: Ctrl-C displays a session summary (Sent/Received/Loss) and closes logs cleanly.
-
-### ✅ Web Dashboard (Live Diagnostics)
-
-*   **Cyberpunk Aesthetics**: High-contrast Neon Lime Green theme for high readability.
-*   **Real-time Monitoring**: WebSocket-driven live ping monitoring.
-*   **API-First**: Built with FastAPI for high performance and low latency.
-*   **Next.js Frontend**: Modern, responsive interface.
-
-### ✅ Platform‑friendly
-
-*   Linux & WSL friendly
-*   No root / sudo required
-*   Uses standard system utilities
-
-***
-
-## Example Usage
-
-### Help
-
-```bash
-❯ nethealth --help
+```
+nethealth tui 1.1.1.1 google.com cloudflare.com
 ```
 
-### Snapshot health check suite
+---
+
+## Install
+
+### Linux Mint (or any Linux with pipx)
 
 ```bash
-❯ nethealth check google.com
-🔎 Checking network health for google.com
-
-✅ DNS        OK — {'name': 'DNS', 'status': 'ok', 'latency': 66.7}
-✅ Ping       OK — {'name': 'Ping', 'status': 'ok', 'avg_ms': 50.6}
-✅ HTTP       OK — {'name': 'HTTP', 'status': 'ok', 'code': 301, 'latency': 828.9}
-✅ Port       OK — Open ports: 80, 443
-
-🚀 Running traceroute to google.com...
-✅ Traceroute complete (12 hops)
-  1: 192.168.1.1 (0.9 ms)
-  2: 10.0.0.1 (10.2 ms)
-  3: ...
-  12: 142.250.190.46 (15.4 ms)
+pipx install git+https://github.com/Aussietin/nethealth
 ```
 
-### Long‑running ping monitor
+Done. `nethealth` is now on your PATH globally.
+
+**Shell completion:**
 
 ```bash
-nethealth monitor ping --targets google.com,1.1.1.1 --interval 1
+# bash — add to ~/.bashrc
+eval "$(_NETHEALTH_COMPLETE=bash_source nethealth)"
+
+# zsh — add to ~/.zshrc
+eval "$(env _NETHEALTH_COMPLETE=zsh_source nethealth)"
 ```
 
-Press **Ctrl‑C** at any time for a clean exit and summary:
-
-```text
-🛑 Interrupt received. Cleaning up...
-
---- Monitoring Summary ---
-Duration: 12.5s
-Target google.com    : Sent=12, Received=12, Loss=0.0%
-Target 1.1.1.1       : Sent=12, Received=11, Loss=8.3%
-
-✅ Statistics collection complete.
-```
-
-***
-
-## Port & Traceroute Commands
-
-You can also run individual diagnostic tools:
+### WSL2 / Ubuntu (dev machine)
 
 ```bash
-# Check specific ports
+git clone https://github.com/Aussietin/nethealth
+cd nethealth
+python3 -m venv .venv && .venv/bin/pip install -e .
+```
+
+Then add to `~/.zshrc`:
+
+```bash
+# nethealth CLI
+export PATH="/home/austin/dev/projects/nethealth/.venv/bin:$PATH"
+
+# shell completion
+eval "$(env _NETHEALTH_COMPLETE=zsh_source nethealth)"
+```
+
+**Windows Terminal desktop shortcut** — right-click the desktop → New Shortcut, target:
+
+```
+wt.exe wsl -e bash -c "source ~/.zshrc; nethealth tui; exec zsh"
+```
+
+### Requirements
+
+- Python 3.9+
+- `ping` utility on PATH (standard on all Linux/WSL)
+- `iw` for WiFi info: `sudo apt install iw` (optional)
+
+---
+
+## Commands
+
+### TUI — live monitor
+
+```bash
+nethealth tui                              # defaults: google.com + 1.1.1.1
+nethealth tui 8.8.8.8 cloudflare.com      # custom targets
+```
+
+Keybindings: `r` refresh · `t` add target · `q` quit
+
+Live status table (DNS / Ping / HTTP / Port), ping sparklines with latency history and packet loss %, scrolling log panel.
+
+### Full check suite
+
+```bash
+nethealth check google.com
+nethealth check google.com --json          # raw JSON
+nethealth check google.com --save json     # append to ~/.nethealth/history.json
+nethealth check google.com --save csv      # append to ~/.nethealth/history.csv
+nethealth check google.com --skip-traceroute
+```
+
+### Individual checks
+
+```bash
+nethealth dns 1.1.1.1
+nethealth ping 1.1.1.1
+nethealth http google.com
 nethealth port google.com --ports 80,443,8080
-
-# Detailed traceroute
-nethealth traceroute google.com --max-hops 30
-
-# Advanced Linux raw traceroute (requires root)
-sudo nethealth traceroute google.com --max-hops 30
-
-# Capture raw packets on Linux
-sudo nethealth sniffer --interface any --count 8 --timeout 10
+nethealth traceroute google.com --max-hops 20
 ```
 
-> Note: raw packet capture requires root privileges. If `sudo nethealth ...` reports `command not found`, the `nethealth` entrypoint is not visible in the root environment. Either install the package globally or run:
->
-> ```bash
-> sudo env "PATH=$PATH" nethealth sniffer --interface any --count 8 --timeout 10
-> ```
->
-> Or use Python directly from your project:
->
-> ```bash
-> sudo python -m nethealth.cli sniffer --interface any --count 8 --timeout 10
-> ```
+### Speed test
 
-***
-
-## Web Dashboard & Development
-
-For developers or users who prefer a GUI, NetHealth includes a web dashboard. Use the `manage.py` script to manage the application lifecycle.
-
-### Development Mode
-Starts both the FastAPI backend (port 8000) and Next.js frontend (port 3000) with hot-reload.
 ```bash
-python manage.py dev
+nethealth speed                # 10 MB download from Cloudflare
+nethealth speed --size 25      # larger sample for more accurate result
+nethealth speed --json
 ```
 
-### Build for Production
-Installs dependencies and exports the frontend for static serving by the backend.
+### WiFi info
+
 ```bash
-python manage.py build
+nethealth wifi                 # SSID, signal dBm, band, TX rate
 ```
 
-### Run Production Server
-Starts the high-performance unified server.
+Requires `iw` (`sudo apt install iw`). Reports gracefully in WSL2 where the host WiFi adapter is not exposed.
+
+### Long-running ping monitor
+
 ```bash
-python manage.py run
+nethealth monitor ping --targets 1.1.1.1,google.com --interval 1 --duration 300
 ```
 
-***
+Logs per-target to `nethealth-logs/`. Ctrl-C for a clean summary.
 
-## Project Structure
+### Report
 
-```text
+```bash
+nethealth report               # summary of all saved history
+nethealth report --target google.com
+nethealth report --last 50     # most recent 50 runs only
+nethealth report --json
+```
+
+Reads from `~/.nethealth/history.json`. Populate it with `nethealth check --save json`.
+
+### Packet sniffer
+
+```bash
+sudo nethealth sniffer --interface any --count 8
+```
+
+Captures raw Ethernet frames, parses IPv4/TCP/UDP/ICMP headers. Requires root.
+
+---
+
+## Project structure
+
+```
 nethealth/
-├─ nethealth/           # Core Python Logic
-│  ├─ checks/           # Diagnostic modules
-│  ├─ api.py            # FastAPI backend
-│  └─ cli.py            # CLI entry point
-├─ frontend/            # Next.js Application (Cyberpunk UI)
-├─ manage.py            # Lifecycle management script
-├─ pyproject.toml       # Packaging metadata
-└─ README.md            # This file
+├── nethealth/
+│   ├── checks/         # dns, ping, http, port, traceroute, speed, wifi, ping_monitor, packet_sniffer
+│   ├── cli.py          # Click entry point
+│   ├── tui.py          # Textual TUI
+│   ├── output.py       # shared Rich formatting
+│   └── report.py       # history aggregation
+└── pyproject.toml
 ```
 
-***
+---
 
-## Extending nethealth
+## Extending
 
-Adding a new check is easy:
+Adding a new check:
 
-1.  Create a module in `nethealth/checks/`
-2.  Define a function that returns a structured result.
-3.  Import and wire it in `cli.py`
+1. Create `nethealth/checks/mycheck.py` — return a dict with at least `{"name": "…", "status": "ok"|"fail"}`
+2. Import and call it in `cli.py`
+3. Optionally wire it into the TUI status table in `tui.py`
 
-***
+---
 
 ## License
 
