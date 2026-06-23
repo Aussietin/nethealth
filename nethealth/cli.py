@@ -1,11 +1,14 @@
 import click
 import json
 import csv
+import time
+import signal
 from datetime import datetime
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.live import Live
 from rich import box
 
 from nethealth.checks.dns import dns_check
@@ -278,6 +281,95 @@ def monitor_ping_cmd(targets, interval, duration, log_dir):
         console.print("\n[yellow]🛑 Session ended early by user.[/yellow]")
 
 
+@monitor.command("http")
+@click.argument("targets", nargs=-1, required=True, metavar="TARGET...")
+@click.option("--interval", default=30, show_default=True, type=int, help="Seconds between checks")
+def monitor_http_cmd(targets, interval):
+    """Long-running HTTP uptime monitor. Ctrl+C to stop and print a summary."""
+    stats = {
+        t: {"total": 0, "ok": 0, "last_status": None, "last_code": None,
+            "last_ms": None, "last_checked": None, "down_since": None, "downtime_s": 0}
+        for t in targets
+    }
+
+    def _make_table() -> Table:
+        now = datetime.now()
+        tbl = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold cyan", pad_edge=False)
+        tbl.add_column("Target",        width=26)
+        tbl.add_column("Status",        width=8)
+        tbl.add_column("Code",          width=6)
+        tbl.add_column("Uptime%",       width=9)
+        tbl.add_column("Downtime",      width=10)
+        tbl.add_column("Last checked",  width=10)
+        for t, s in stats.items():
+            uptime = (s["ok"] / s["total"] * 100) if s["total"] else 100.0
+            uc = "green" if uptime == 100 else ("yellow" if uptime >= 95 else "red")
+            st = s["last_status"]
+            status_str = ("[green]UP[/green]"   if st == "ok"
+                          else "[red]DOWN[/red]" if st == "fail"
+                          else "[dim]—[/dim]")
+            total_down = s["downtime_s"]
+            if s["down_since"] is not None:
+                total_down += int((now - s["down_since"]).total_seconds())
+            tbl.add_row(
+                t, status_str,
+                str(s["last_code"]) if s["last_code"] else "—",
+                f"[{uc}]{uptime:.1f}%[/{uc}]",
+                _fmt_duration(total_down) if total_down else "—",
+                s["last_checked"].strftime("%H:%M:%S") if s["last_checked"] else "—",
+            )
+        return tbl
+
+    running = True
+
+    def _stop(sig, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT, _stop)
+
+    console.print(f"\n  [bold]HTTP monitor[/bold]  {len(targets)} target(s) · every {interval}s · Ctrl+C to stop\n")
+
+    with Live(_make_table(), refresh_per_second=1, console=console) as live:
+        while running:
+            for t in targets:
+                if not running:
+                    break
+                r = http_check(t)
+                s = stats[t]
+                now = datetime.now()
+                s["total"] += 1
+                s["last_checked"] = now
+                s["last_status"] = r["status"]
+                s["last_code"] = r.get("code")
+                s["last_ms"] = r.get("latency")
+                if r["status"] == "ok":
+                    s["ok"] += 1
+                    if s["down_since"] is not None:
+                        s["downtime_s"] += int((now - s["down_since"]).total_seconds())
+                        s["down_since"] = None
+                else:
+                    if s["down_since"] is None:
+                        s["down_since"] = now
+                live.update(_make_table())
+
+            for _ in range(interval):
+                if not running:
+                    break
+                time.sleep(1)
+            live.update(_make_table())
+
+    console.print("\n[bold]Session summary[/bold]\n")
+    for t, s in stats.items():
+        uptime = (s["ok"] / s["total"] * 100) if s["total"] else 100.0
+        color = "green" if uptime == 100 else ("yellow" if uptime >= 95 else "red")
+        total_down = s["downtime_s"]
+        down_str = f"  downtime {_fmt_duration(total_down)}" if total_down else ""
+        console.print(f"  [bold]{t}[/bold]  [{color}]{uptime:.1f}% uptime[/{color}]  "
+                      f"({s['ok']}/{s['total']} checks){down_str}")
+    console.print()
+
+
 @cli.command()
 @click.argument("targets", nargs=-1, metavar="[TARGET]...")
 @click.option("--interval", default=None, type=int, help="Override refresh interval (seconds)")
@@ -355,6 +447,51 @@ def wifi():
     if tx:
         console.print(f"  TX rate: {tx:.0f} Mbps")
     console.print()
+
+
+@cli.command()
+@click.argument("host")
+@click.option("--port", default=443, show_default=True, type=int, help="Port to check")
+@click.option("--json", "output_json", is_flag=True, help="Output raw JSON")
+def ssl(host, port, output_json):
+    """Check TLS certificate validity and expiry for a host."""
+    from nethealth.checks.ssl import ssl_check
+
+    result = ssl_check(host, port=port)
+
+    if output_json:
+        import json as _json
+        click.echo(_json.dumps(result, indent=2))
+        return
+
+    if result["status"] == "fail":
+        console.print(f"\n  [red]❌ SSL FAIL[/red]  {host}:{port}  —  {result.get('error', 'unknown')}\n")
+        return
+
+    days = result["days_left"]
+    if days > 30:
+        color, icon = "green", "✅"
+    elif days > 7:
+        color, icon = "yellow", "⚠ "
+    else:
+        color, icon = "red", "❌"
+
+    console.print()
+    console.print(f"  {icon} [bold]{host}[/bold]:{port}")
+    console.print(f"  Expires  : [{color}]{result['expires']}  ({days} days)[/{color}]")
+    console.print(f"  Subject  : {result['subject_cn']}")
+    console.print(f"  Issuer   : {result['issuer_o']}")
+    if result.get("sans"):
+        console.print(f"  SANs     : [dim]{', '.join(result['sans'][:3])}{'…' if len(result['sans']) > 3 else ''}[/dim]")
+    console.print()
+
+
+def _fmt_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
 
 
 @cli.command()
