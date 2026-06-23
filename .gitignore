@@ -11,3 +11,8 @@ __pycache__/
 
 logs/
 nethealth.egg-info/
+
+# Runtime artifacts
+backend.log
+backend.pid
+nethealth-logs/
