@@ -1,0 +1,13 @@
+# Node.js
+node_modules/
+
+# Python
+__pycache__/
+.venv/
+
+# General
+.env
+.DS_Store
+
+logs/
+nethealth.egg-info/
