@@ -1,0 +1,11 @@
+services:
+  nethealth:
+    build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    volumes:
+      - nethealth-history:/root/.nethealth   # persists CLI check history
+
+volumes:
+  nethealth-history:

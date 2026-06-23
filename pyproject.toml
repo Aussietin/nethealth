@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nethealth"
+version = "0.1.0"
+description = "Network health CLI tool"
+requires-python = ">=3.9"
+dependencies = [
+    "click",
+    "rich",
+    "httpx",
+    "dnspython",
+    "fastapi",
+    "uvicorn",
+    "jinja2",
+]
+
+[project.scripts]
+nethealth = "nethealth.cli:cli"
+
+[tool.setuptools]
+packages = ["nethealth", "nethealth.checks"]
