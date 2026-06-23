@@ -280,12 +280,12 @@ def monitor_ping_cmd(targets, interval, duration, log_dir):
 
 @cli.command()
 @click.argument("targets", nargs=-1, metavar="[TARGET]...")
-def tui(targets):
-    """Live network health monitor (Textual TUI). Press q to quit, r to refresh, t to add a target."""
+@click.option("--interval", default=None, type=int, help="Override refresh interval (seconds)")
+def tui(targets, interval):
+    """Live network health monitor (Textual TUI). Defaults come from ~/.nethealth/config.toml."""
     from nethealth.tui import run_tui
 
-    target_list = list(targets) if targets else ["google.com", "1.1.1.1"]
-    run_tui(target_list)
+    run_tui(targets=list(targets) or None, refresh_interval=interval)
 
 
 @cli.command()
