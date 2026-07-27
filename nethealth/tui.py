@@ -9,10 +9,10 @@ from typing import ClassVar
 
 from rich.text import Text
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     DataTable,
     Footer,
@@ -32,6 +32,7 @@ from nethealth.checks.dns import dns_check
 from nethealth.checks.http import http_check
 from nethealth.checks.ping import ping_check
 from nethealth.checks.port import port_check
+from nethealth.checks.speed import speed_check
 from nethealth.checks.ssl import ssl_check
 from nethealth.checks.traceroute import traceroute_check
 from nethealth.checks.wifi import wifi_check
@@ -57,6 +58,10 @@ def _cell(text: str, ok: bool | None) -> Text:
     if ok is None:
         return Text(text, style="dim")
     return Text(text, style="green" if ok else "red bold")
+
+
+def _checking_cell() -> Text:
+    return Text("…", style="yellow")
 
 
 def _render_wifi_text(result: dict) -> str:
@@ -239,6 +244,7 @@ class NetHealthTUI(App):
         Binding("t",   "add_target",   "Add target"),
         Binding("d",   "remove_target", "Remove"),
         Binding("p",   "toggle_pause", "Pause/Resume"),
+        Binding("s",   "run_speed_test", "Speed test"),
         Binding("1",   "show_tab('monitor')", "Monitor",  show=False),
         Binding("2",   "show_tab('log')",     "Log",      show=False),
         Binding("3",   "show_tab('report')",  "Report",   show=False),
@@ -246,10 +252,18 @@ class NetHealthTUI(App):
 
     DEFAULT_CSS = """
     TabbedContent, TabPane { height: 1fr; }
-    #wifi-bar {
+    #info-bar {
         height: 1;
-        padding: 0 1;
         background: $primary-darken-3;
+    }
+    #wifi-status {
+        width: 1fr;
+        padding: 0 1;
+    }
+    #health-status {
+        width: 1fr;
+        padding: 0 1;
+        text-align: right;
     }
     #monitor-pane { height: 1fr; }
     #monitor-left {
@@ -289,7 +303,9 @@ class NetHealthTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(id="wifi-bar")
+        with Horizontal(id="info-bar"):
+            yield Static(id="wifi-status")
+            yield Static(id="health-status")
         with TabbedContent(initial="monitor"):
             with TabPane("  Monitor  ", id="monitor"):
                 with Horizontal(id="monitor-pane"):
@@ -314,15 +330,16 @@ class NetHealthTUI(App):
         for target in self._targets:
             table.add_row(
                 target,
-                _cell("—", None), _cell("—", None), _cell("—", None), _cell("—", None), _cell("—", None), "—",
+                _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), "—",
                 key=target,
             )
             self._mount_sparkline(target)
 
         self._log(f"[cyan]nethealth TUI[/cyan] — watching {len(self._targets)} target(s)  "
                   f"[dim]refresh every {self._refresh}s · keys: r refresh · t add · d remove · "
-                  f"p pause · enter details · 1/2/3 tabs · q quit[/dim]")
+                  f"p pause · s speed test · enter details · ctrl+p commands · 1/2/3 tabs · q quit[/dim]")
 
+        self._update_health_bar()
         self.set_interval(self._refresh, self._auto_refresh)
         self.set_interval(WIFI_REFRESH_INTERVAL, self._refresh_wifi)
         self.action_refresh()
@@ -351,9 +368,38 @@ class NetHealthTUI(App):
     # ── Row selection → detail screen ────────────────────────────────────────
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        target = event.row_key.value
+        self._open_detail_for_cursor()
+
+    def _open_detail_for_cursor(self) -> None:
+        table = self.query_one(DataTable)
+        if table.cursor_row is None or not self._targets:
+            self.notify("No target selected", severity="warning")
+            return
+        try:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        except Exception:
+            return
+        target = row_key.value
         if target in self._targets:
             self.push_screen(TargetDetailScreen(target, self))
+
+    # ── Command palette ───────────────────────────────────────────────────────
+
+    def get_system_commands(self, screen: Screen):
+        yield from super().get_system_commands(screen)
+        yield SystemCommand("Add target", "Monitor a new host or IP", self.action_add_target)
+        yield SystemCommand("Remove selected target", "Stop monitoring the highlighted row", self.action_remove_target)
+        yield SystemCommand(
+            "Resume monitoring" if self._paused else "Pause monitoring",
+            "Toggle the automatic refresh loop",
+            self.action_toggle_pause,
+        )
+        yield SystemCommand("Refresh now", "Run all checks immediately", self.action_refresh)
+        yield SystemCommand("Run speed test", "Measure download speed via Cloudflare", self.action_run_speed_test)
+        yield SystemCommand("View target details", "Open the detail view for the highlighted row", self._open_detail_for_cursor)
+        yield SystemCommand("Monitor tab", "Switch to the Monitor tab", lambda: self.action_show_tab("monitor"))
+        yield SystemCommand("Log tab", "Switch to the Log tab", lambda: self.action_show_tab("log"))
+        yield SystemCommand("Report tab", "Switch to the Report tab", lambda: self.action_show_tab("report"))
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -371,20 +417,27 @@ class NetHealthTUI(App):
         state = "paused" if self._paused else "resumed"
         color = "yellow" if self._paused else "green"
         self._log(f"[{color}]Monitoring {state}[/{color}]")
+        self.notify(f"Monitoring {state}", severity="warning" if self._paused else "information")
+        self._update_health_bar()
 
     def action_add_target(self) -> None:
         def on_dismiss(result: str | None) -> None:
-            if not result or result in self._targets:
+            if not result:
+                return
+            if result in self._targets:
+                self.notify(f"{result} is already being monitored", severity="warning")
                 return
             self._targets.append(result)
             self.query_one(DataTable).add_row(
                 result,
-                _cell("—", None), _cell("—", None), _cell("—", None), _cell("—", None), _cell("—", None), "—",
+                _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), "—",
                 key=result,
             )
             self._latency[result]
             self._mount_sparkline(result)
             self._log(f"[green]Added target:[/green] {result}")
+            self.notify(f"Added target: {result}", severity="information")
+            self._update_health_bar()
             self._run_checks(result)
 
         self.push_screen(AddTargetScreen(), on_dismiss)
@@ -392,6 +445,7 @@ class NetHealthTUI(App):
     def action_remove_target(self) -> None:
         table = self.query_one(DataTable)
         if table.cursor_row is None or not self._targets:
+            self.notify("No target selected", severity="warning")
             return
         try:
             row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
@@ -416,6 +470,35 @@ class NetHealthTUI(App):
             label.remove()
 
         self._log(f"[red]Removed target:[/red] {target}")
+        self.notify(f"Removed target: {target}", severity="warning")
+        self._update_health_bar()
+
+    # ── Speed test ────────────────────────────────────────────────────────────
+
+    def action_run_speed_test(self) -> None:
+        self.notify("Running speed test…", timeout=3)
+        self._run_speed_test()
+
+    @work(thread=True)
+    def _run_speed_test(self) -> None:
+        size_mb = cfg_mod.load().get("speed", {}).get("size_mb", 10)
+        try:
+            result = speed_check(size_mb=size_mb)
+        except Exception as exc:
+            result = {"status": "fail", "error": str(exc)}
+        self.call_from_thread(self._show_speed_result, result)
+
+    def _show_speed_result(self, result: dict) -> None:
+        if result.get("status") == "ok":
+            mbps = result["mbps"]
+            latency = result.get("latency_ms")
+            msg = f"↓ {mbps:.1f} Mbps" + (f"  ·  {latency:.0f} ms to first byte" if latency else "")
+            self.notify(msg, title="Speed test", severity="information", timeout=8)
+            self._log(f"[cyan]Speed test:[/cyan] {mbps:.1f} Mbps")
+        else:
+            error = result.get("error", "speed test failed")
+            self.notify(error, title="Speed test failed", severity="error", timeout=8)
+            self._log(f"[cyan]Speed test:[/cyan] [red]{error}[/red]")
 
     # ── WiFi bar ──────────────────────────────────────────────────────────────
 
@@ -428,7 +511,29 @@ class NetHealthTUI(App):
         self.call_from_thread(self._update_wifi_bar, result)
 
     def _update_wifi_bar(self, result: dict) -> None:
-        self.query_one("#wifi-bar", Static).update(_render_wifi_text(result))
+        self.query_one("#wifi-status", Static).update(_render_wifi_text(result))
+
+    # ── Health summary bar ───────────────────────────────────────────────────
+
+    def _update_health_bar(self) -> None:
+        total = len(self._targets)
+        if total == 0:
+            text = "[dim]No targets — press t or open the command palette (ctrl+p) to add one[/dim]"
+        else:
+            healthy = sum(
+                1 for t in self._targets
+                if t in self._latest and all(
+                    self._latest[t][k]["status"] == "ok" for k in ("dns", "ping", "http", "port", "ssl")
+                )
+            )
+            color = "green" if healthy == total else ("yellow" if healthy else "red")
+            state = "[yellow]paused[/yellow]" if self._paused else f"every {self._refresh}s"
+            now = datetime.now().strftime("%H:%M:%S")
+            text = (
+                f"[{color}]●[/{color}] {healthy}/{total} healthy   "
+                f"[dim]refresh {state} · last {now}[/dim]"
+            )
+        self.query_one("#health-status", Static).update(text)
 
     # ── Worker ────────────────────────────────────────────────────────────────
 
@@ -452,13 +557,29 @@ class NetHealthTUI(App):
             "port": port_r,
             "ssl":  ssl_r,
         }
+        failed_now: list[str] = []
+        recovered_now: list[str] = []
         for check_name, result in results_map.items():
             new_state = result["status"]  # "ok" or "fail"
             old_state = self._states[target][check_name]
             if new_state == "fail" and old_state != "fail":
                 error = result.get("error", result.get("message", "check failed"))
                 alerts_mod.fire(target, check_name, str(error), self._alert_cfg)
+                failed_now.append(check_name.upper())
+            elif new_state == "ok" and old_state == "fail":
+                recovered_now.append(check_name.upper())
             self._states[target][check_name] = new_state
+
+        if failed_now:
+            self.call_from_thread(
+                self.notify, f"{target}: {', '.join(failed_now)} failing",
+                title="Check failed", severity="error", timeout=6,
+            )
+        if recovered_now:
+            self.call_from_thread(
+                self.notify, f"{target}: {', '.join(recovered_now)} recovered",
+                title="Recovered", severity="information", timeout=4,
+            )
 
         self.call_from_thread(self._update_ui, target, dns_r, ping_r, http_r, port_r, ssl_r)
 
@@ -515,6 +636,7 @@ class NetHealthTUI(App):
             "dns": dns_r, "ping": ping_r, "http": http_r, "port": port_r, "ssl": ssl_r,
             "loss_pct": loss_pct, "avg_ms": avg,
         }
+        self._update_health_bar()
 
         all_ok = all(_ok(r) for r in [dns_r, ping_r, http_r, port_r])
         icons  = "".join("✓" if _ok(r) else "✗" for r in [dns_r, ping_r, http_r, port_r])
