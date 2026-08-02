@@ -50,6 +50,9 @@ def _fmt_port(result: dict) -> str:
     return f"open: {', '.join(open_ports)}" if open_ports else "all closed"
 
 
+_MAX_HISTORY_ENTRIES = 5000  # keep --save json from growing unbounded over months of use
+
+
 def _save_history(target: str, results: dict, fmt: str) -> Path:
     history_dir = Path.home() / ".nethealth"
     history_dir.mkdir(exist_ok=True)
@@ -57,8 +60,22 @@ def _save_history(target: str, results: dict, fmt: str) -> Path:
 
     if fmt == "json":
         path = history_dir / "history.json"
-        history = json.loads(path.read_text()) if path.exists() else []
+        history = []
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text())
+                if isinstance(loaded, list):
+                    history = loaded
+                else:
+                    raise ValueError("history.json root is not a list")
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Warning: {path} was unreadable ({exc}) -- "
+                    f"starting a fresh history file (old one left on disk).[/yellow]"
+                )
         history.append({"timestamp": ts, "target": target, "results": results})
+        if len(history) > _MAX_HISTORY_ENTRIES:
+            history = history[-_MAX_HISTORY_ENTRIES:]
         path.write_text(json.dumps(history, indent=2))
         return path
 

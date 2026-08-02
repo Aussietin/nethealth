@@ -191,6 +191,12 @@ def _system_traceroute(target: str, max_hops: int = 30) -> dict:
             "status": "fail",
             "message": "Traceroute timed out",
         }
+    except FileNotFoundError:
+        return {
+            "name": "Traceroute",
+            "status": "fail",
+            "message": "'traceroute' command not found. Install it (e.g. sudo apt install traceroute).",
+        }
 
 
 def traceroute_check(target: str, max_hops: int = 30) -> dict:

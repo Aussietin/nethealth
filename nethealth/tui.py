@@ -52,6 +52,17 @@ _COL_UPDATED = "Updated"
 
 _CHECKS = [_COL_DNS, _COL_PING, _COL_HTTP, _COL_PORT, _COL_SSL]
 
+
+def _safe_check(fn, *args, **kwargs) -> dict:
+    """Run a check_* function, converting a genuinely unexpected exception
+    (as opposed to the {"status": "fail", ...} dict every check function
+    already returns for its own known failure modes) into the same shape,
+    so one bad check can't blank an entire refresh cycle for a target."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        return {"status": "fail", "error": f"internal error: {exc}"}
+
 _WIFI_QUALITY_COLOR = {"excellent": "green", "good": "green", "fair": "yellow", "poor": "red"}
 
 
@@ -617,7 +628,10 @@ class NetHealthTUI(App):
         def on_dismiss(result: str | None) -> None:
             if not result:
                 return
-            if result in self._targets:
+            # Case-insensitive: hostnames are case-insensitive by spec (and
+            # lower-casing an IP literal is a no-op), so "Google.com" added
+            # after "google.com" is a duplicate, not a second target.
+            if result.lower() in {t.lower() for t in self._targets}:
                 self.notify(f"{result} is already being monitored", severity="warning")
                 return
             self._targets.append(result)
@@ -729,15 +743,15 @@ class NetHealthTUI(App):
 
     @work(thread=True)
     def _run_checks(self, target: str) -> None:
-        try:
-            dns_r  = dns_check(target)
-            ping_r = ping_check(target)
-            http_r = http_check(target)
-            port_r = port_check(target)
-            ssl_r  = ssl_check(target, timeout=5)
-        except Exception as exc:
-            self.call_from_thread(self._log, f"[red]Error checking {target}: {exc}[/red]")
-            return
+        # Each check is isolated (see _safe_check above): without it, one
+        # bad check would blank the entire cycle for this target -- no
+        # update, no alert, row stuck on "checking..." forever -- instead
+        # of just that one check showing FAIL.
+        dns_r  = _safe_check(dns_check, target)
+        ping_r = _safe_check(ping_check, target)
+        http_r = _safe_check(http_check, target)
+        port_r = _safe_check(port_check, target)
+        ssl_r  = _safe_check(ssl_check, target, timeout=5)
 
         # Fire alerts on state transitions
         results_map = {
@@ -878,8 +892,42 @@ class NetHealthTUI(App):
         self.query_one("#log-panel", RichLog).write(msg)
 
 
+_HARD_DEFAULT_TARGETS = ["google.com", "1.1.1.1"]
+_HARD_DEFAULT_REFRESH = 30
+
+
+def _valid_config_targets(value: object) -> list[str] | None:
+    """A hand-edited config.toml can have `targets = "google.com"` (a typo'd
+    string instead of a list) or `targets = []`. list(str) would silently
+    iterate character-by-character and list([]) would launch with nothing
+    monitored -- neither fails loudly, they just produce nonsense. Return
+    None for anything that isn't a usable non-empty list of strings so the
+    caller can fall back instead."""
+    if not isinstance(value, list) or not value:
+        return None
+    cleaned = [str(v).strip() for v in value if str(v).strip()]
+    return cleaned or None
+
+
+def _valid_refresh_interval(value: object) -> int | None:
+    try:
+        interval = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return interval if interval > 0 else None
+
+
 def run_tui(targets: list[str] | None = None, refresh_interval: int | None = None) -> None:
     cfg = cfg_mod.defaults()
-    t   = targets        if targets         else cfg.get("targets",          ["google.com", "1.1.1.1"])
-    r   = refresh_interval if refresh_interval else cfg.get("refresh_interval", 30)
+
+    t = targets or _valid_config_targets(cfg.get("targets"))
+    if t is None:
+        t = _HARD_DEFAULT_TARGETS
+        print(f"[nethealth] config.toml has no usable [defaults].targets -- using {t}")
+
+    r = refresh_interval or _valid_refresh_interval(cfg.get("refresh_interval"))
+    if r is None:
+        r = _HARD_DEFAULT_REFRESH
+        print(f"[nethealth] config.toml has no usable [defaults].refresh_interval -- using {r}s")
+
     NetHealthTUI(t, r).run()
