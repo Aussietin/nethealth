@@ -69,7 +69,7 @@ nethealth tui                              # defaults: google.com + 1.1.1.1
 nethealth tui 8.8.8.8 cloudflare.com      # custom targets
 ```
 
-Keybindings: `r` refresh · `t` add target · `q` quit
+Keybindings: `r` refresh · `t` add target · `d` remove · `p` pause · `s` speed test · `/` filter targets · `c` settings · `enter` target details · `ctrl+p` command palette · `q` quit
 
 Live status table (DNS / Ping / HTTP / Port), ping sparklines with latency history and packet loss %, scrolling log panel.
 

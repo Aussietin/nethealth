@@ -14,6 +14,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
+    Button,
     DataTable,
     Footer,
     Header,
@@ -234,6 +235,112 @@ class TargetDetailScreen(ModalScreen):
             log.write(f"  [{color}]{hop.get('hop'):>3}  {addr:<16} {lat_s}[/{color}]")
 
 
+class SettingsScreen(ModalScreen):
+    """View/edit ~/.nethealth/config.toml. Mirrors TargetDetailScreen's
+    modal structure: a bordered dialog, its own BINDINGS, dismiss to close."""
+
+    DEFAULT_CSS = """
+    SettingsScreen { align: center middle; }
+    #settings-dialog {
+        background: $surface;
+        border: solid $accent;
+        padding: 1 2;
+        width: 64;
+        height: auto;
+    }
+    #settings-dialog Label { margin-top: 1; }
+    #settings-warning { color: $warning; margin-top: 1; }
+    #settings-buttons { margin-top: 1; height: 3; align-horizontal: right; }
+    #settings-buttons Button { margin-left: 1; }
+    """
+
+    BINDINGS: ClassVar[list] = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        data, error = cfg_mod.load_with_status()
+        defaults_ = data.get("defaults", {})
+        alerts_   = data.get("alerts", {})
+
+        with Vertical(id="settings-dialog"):
+            yield Label("[bold]nethealth settings[/bold]  [dim]~/.nethealth/config.toml[/dim]")
+            if error:
+                yield Static(
+                    f"[yellow]Config file couldn't be read ({error}) — showing defaults.\n"
+                    f"Saving will replace it with a valid file.[/yellow]",
+                    id="settings-warning",
+                )
+            yield Label("Default targets (comma-separated):")
+            yield Input(
+                value=", ".join(defaults_.get("targets", [])),
+                placeholder="google.com, 1.1.1.1",
+                id="settings-targets",
+            )
+            yield Label("Refresh interval (seconds):")
+            yield Input(
+                value=str(defaults_.get("refresh_interval", 30)),
+                id="settings-interval",
+            )
+            yield Label("Alert webhook URL (optional):")
+            yield Input(
+                value=alerts_.get("webhook_url", "") or "",
+                placeholder="https://…",
+                id="settings-webhook",
+            )
+            with Horizontal(id="settings-buttons"):
+                yield Button("Cancel", id="settings-cancel")
+                yield Button("Save", id="settings-save", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#settings-targets", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "settings-save":
+            self._save()
+        elif event.button.id == "settings-cancel":
+            self.dismiss(None)
+
+    def _save(self) -> None:
+        targets_raw  = self.query_one("#settings-targets", Input).value
+        interval_raw = self.query_one("#settings-interval", Input).value.strip()
+        webhook      = self.query_one("#settings-webhook", Input).value.strip()
+
+        targets = [t.strip() for t in targets_raw.split(",") if t.strip()]
+        if not targets:
+            self.app.notify("At least one default target is required", severity="error")
+            return
+
+        try:
+            interval = int(interval_raw)
+            if interval <= 0:
+                raise ValueError
+        except ValueError:
+            self.app.notify(
+                "Refresh interval must be a positive whole number of seconds",
+                severity="error",
+            )
+            return
+
+        data, _ = cfg_mod.load_with_status()
+        data.setdefault("defaults", {})
+        data["defaults"]["targets"] = targets
+        data["defaults"]["refresh_interval"] = interval
+        data.setdefault("alerts", {})
+        data["alerts"]["webhook_url"] = webhook
+
+        try:
+            cfg_mod.save(data)
+        except Exception as exc:
+            self.app.notify(f"Could not write config file: {exc}", severity="error")
+            return
+
+        self.dismiss({"targets": targets, "refresh_interval": interval, "webhook_url": webhook})
+
+
 class NetHealthTUI(App):
     TITLE = "nethealth"
     SUB_TITLE = "Network Health Monitor"
@@ -245,6 +352,9 @@ class NetHealthTUI(App):
         Binding("d",   "remove_target", "Remove"),
         Binding("p",   "toggle_pause", "Pause/Resume"),
         Binding("s",   "run_speed_test", "Speed test"),
+        Binding("slash", "toggle_filter", "Filter"),
+        Binding("escape", "clear_filter", "Clear filter", show=False),
+        Binding("c",   "open_settings", "Settings"),
         Binding("1",   "show_tab('monitor')", "Monitor",  show=False),
         Binding("2",   "show_tab('log')",     "Log",      show=False),
         Binding("3",   "show_tab('report')",  "Report",   show=False),
@@ -266,6 +376,10 @@ class NetHealthTUI(App):
         text-align: right;
     }
     #monitor-pane { height: 1fr; }
+    #filter-input {
+        display: none;
+        border: solid $accent;
+    }
     #monitor-left {
         width: 58%;
         border-right: solid $primary-darken-2;
@@ -296,6 +410,8 @@ class NetHealthTUI(App):
         # state tracking for alerts: {target: {check: "ok"|"fail"|"unknown"}}
         self._states:         dict[str, dict[str, str]] = defaultdict(lambda: defaultdict(lambda: "unknown"))
         self._latest:         dict[str, dict]         = {}
+        self._latest_cells:   dict[str, tuple]        = {}
+        self._filter:         str                     = ""
         self._alert_cfg:      dict                    = cfg_mod.alert_cfg()
         self._report_loaded:  bool                    = False
 
@@ -311,6 +427,7 @@ class NetHealthTUI(App):
                 with Horizontal(id="monitor-pane"):
                     with Vertical(id="monitor-left"):
                         yield Static("  Status", classes="panel-title")
+                        yield Input(placeholder="Filter targets… (Esc to clear)", id="filter-input")
                         yield DataTable(id="status-table", cursor_type="row")
                     with Vertical(id="monitor-right"):
                         yield Static("  Ping Latency (ms)", classes="panel-title")
@@ -328,16 +445,13 @@ class NetHealthTUI(App):
             table.add_column(col, key=col)
 
         for target in self._targets:
-            table.add_row(
-                target,
-                _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), "—",
-                key=target,
-            )
             self._mount_sparkline(target)
+        self._rebuild_table()
 
         self._log(f"[cyan]nethealth TUI[/cyan] — watching {len(self._targets)} target(s)  "
                   f"[dim]refresh every {self._refresh}s · keys: r refresh · t add · d remove · "
-                  f"p pause · s speed test · enter details · ctrl+p commands · 1/2/3 tabs · q quit[/dim]")
+                  f"p pause · s speed test · / filter · c settings · enter details · "
+                  f"ctrl+p commands · 1/2/3 tabs · q quit[/dim]")
 
         self._update_health_bar()
         self.set_interval(self._refresh, self._auto_refresh)
@@ -364,6 +478,81 @@ class NetHealthTUI(App):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.pane and event.pane.id == "report":
             self._refresh_report()
+
+    # ── Filter ────────────────────────────────────────────────────────────────
+
+    def _target_matches(self, target: str) -> bool:
+        return not self._filter or self._filter in target.lower()
+
+    def _rebuild_table(self) -> None:
+        """Re-render the DataTable rows from self._targets, narrowed to
+        whatever matches self._filter. Uses cached cell values from the
+        last check cycle (self._latest_cells) so filtering doesn't blank
+        out data that's already known — background checks keep running
+        for every target regardless of what's currently visible."""
+        table = self.query_one(DataTable)
+        table.clear()
+        checking = (_checking_cell(),) * 5 + ("—",)
+        for target in self._targets:
+            if not self._target_matches(target):
+                continue
+            cells = self._latest_cells.get(target, checking)
+            table.add_row(target, *cells, key=target)
+
+    def action_toggle_filter(self) -> None:
+        filt = self.query_one("#filter-input", Input)
+        if filt.display:
+            self.action_clear_filter()
+        else:
+            filt.display = True
+            filt.focus()
+
+    def action_clear_filter(self) -> None:
+        filt = self.query_one("#filter-input", Input)
+        if not filt.display and not self._filter:
+            return
+        filt.value = ""
+        filt.display = False
+        self._filter = ""
+        self._rebuild_table()
+        self.query_one(DataTable).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "filter-input":
+            self._filter = event.value.strip().lower()
+            self._rebuild_table()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "filter-input":
+            self.query_one(DataTable).focus()
+
+    # ── Settings ──────────────────────────────────────────────────────────────
+
+    def action_open_settings(self) -> None:
+        def on_dismiss(result: dict | None) -> None:
+            if result is None:
+                return
+            # Alert config (webhook) is cheap to hot-apply immediately.
+            self._alert_cfg = cfg_mod.alert_cfg()
+            # Default targets / refresh interval are persisted to the config
+            # file but only take effect on the *next* TUI launch — this
+            # session keeps running with whatever targets/interval it
+            # started with (or whatever t/d have since changed), same as
+            # editing the TOML file by hand would.
+            self._log(
+                f"[green]Settings saved[/green] — {len(result['targets'])} default target(s), "
+                f"refresh {result['refresh_interval']}s, webhook "
+                f"{'set' if result['webhook_url'] else 'cleared'}"
+            )
+            self.notify(
+                "Saved. Alert webhook applied immediately — "
+                "default targets and refresh interval take effect next launch.",
+                title="Settings",
+                severity="information",
+                timeout=6,
+            )
+
+        self.push_screen(SettingsScreen(), on_dismiss)
 
     # ── Row selection → detail screen ────────────────────────────────────────
 
@@ -397,6 +586,10 @@ class NetHealthTUI(App):
         yield SystemCommand("Refresh now", "Run all checks immediately", self.action_refresh)
         yield SystemCommand("Run speed test", "Measure download speed via Cloudflare", self.action_run_speed_test)
         yield SystemCommand("View target details", "Open the detail view for the highlighted row", self._open_detail_for_cursor)
+        yield SystemCommand("Filter targets", "Narrow the Monitor table to matching targets", self.action_toggle_filter)
+        if self._filter:
+            yield SystemCommand("Clear filter", "Show all targets in the Monitor table", self.action_clear_filter)
+        yield SystemCommand("Settings", "View and edit ~/.nethealth/config.toml", self.action_open_settings)
         yield SystemCommand("Monitor tab", "Switch to the Monitor tab", lambda: self.action_show_tab("monitor"))
         yield SystemCommand("Log tab", "Switch to the Log tab", lambda: self.action_show_tab("log"))
         yield SystemCommand("Report tab", "Switch to the Report tab", lambda: self.action_show_tab("report"))
@@ -428,13 +621,9 @@ class NetHealthTUI(App):
                 self.notify(f"{result} is already being monitored", severity="warning")
                 return
             self._targets.append(result)
-            self.query_one(DataTable).add_row(
-                result,
-                _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), _checking_cell(), "—",
-                key=result,
-            )
             self._latency[result]
             self._mount_sparkline(result)
+            self._rebuild_table()
             self._log(f"[green]Added target:[/green] {result}")
             self.notify(f"Added target: {result}", severity="information")
             self._update_health_bar()
@@ -461,6 +650,7 @@ class NetHealthTUI(App):
         self._ping_stats.pop(target, None)
         self._states.pop(target, None)
         self._latest.pop(target, None)
+        self._latest_cells.pop(target, None)
 
         spark = self._sparklines.pop(target, None)
         label = self._spark_labels.pop(target, None)
@@ -624,13 +814,19 @@ class NetHealthTUI(App):
             ssl_cell = _cell("FAIL", False)
         now       = datetime.now().strftime("%H:%M:%S")
 
-        table = self.query_one(DataTable)
-        table.update_cell(target, _COL_DNS,     dns_cell,  update_width=True)
-        table.update_cell(target, _COL_PING,    ping_cell, update_width=True)
-        table.update_cell(target, _COL_HTTP,    http_cell, update_width=True)
-        table.update_cell(target, _COL_PORT,    port_cell, update_width=True)
-        table.update_cell(target, _COL_SSL,     ssl_cell,  update_width=True)
-        table.update_cell(target, _COL_UPDATED, now,       update_width=True)
+        # Cache the rendered cells so a filtered-out/back-in target (or a
+        # freshly re-rendered table after a filter change) shows the last
+        # known values instead of reverting to "checking…".
+        self._latest_cells[target] = (dns_cell, ping_cell, http_cell, port_cell, ssl_cell, now)
+
+        if self._target_matches(target):
+            table = self.query_one(DataTable)
+            table.update_cell(target, _COL_DNS,     dns_cell,  update_width=True)
+            table.update_cell(target, _COL_PING,    ping_cell, update_width=True)
+            table.update_cell(target, _COL_HTTP,    http_cell, update_width=True)
+            table.update_cell(target, _COL_PORT,    port_cell, update_width=True)
+            table.update_cell(target, _COL_SSL,     ssl_cell,  update_width=True)
+            table.update_cell(target, _COL_UPDATED, now,       update_width=True)
 
         self._latest[target] = {
             "dns": dns_r, "ping": ping_r, "http": http_r, "port": port_r, "ssl": ssl_r,
