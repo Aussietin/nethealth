@@ -71,7 +71,7 @@ nethealth tui 8.8.8.8 cloudflare.com      # custom targets
 
 Keybindings: `r` refresh · `t` add target · `d` remove · `p` pause · `s` speed test · `/` filter targets · `c` settings · `?` help · `enter` target details · `ctrl+p` command palette · `q` quit
 
-Live status table (DNS / Ping / HTTP / Port), ping sparklines with latency history and packet loss %, scrolling log panel.
+Live status table (DNS / Ping / HTTP / Port / SSL), ping sparklines with latency history and packet loss %, scrolling log panel. The info bar under the header shows WiFi status and default-gateway reachability (both system-level, refreshed every 60s) alongside a live X/Y-healthy summary. An HTTP check reachable but returning a 4xx/5xx response shows red, not green — "reachable" and "healthy" aren't the same thing at a glance.
 
 ### Full check suite
 
@@ -88,9 +88,11 @@ nethealth check google.com --skip-traceroute
 ```bash
 nethealth dns 1.1.1.1
 nethealth ping 1.1.1.1
-nethealth http google.com
+nethealth http google.com          # tries HTTPS first, falls back to plain HTTP if the connection itself fails (e.g. a LAN device with no TLS)
 nethealth port google.com --ports 80,443,8080
 nethealth traceroute google.com --max-hops 20
+nethealth gateway                  # ping the default gateway -- first-hop reachability before DNS/HTTP even matter
+nethealth ip                       # current public/external IP (useful for noticing an ISP IP change)
 ```
 
 ### Speed test
@@ -158,7 +160,7 @@ run against an isolated tmp directory via the `isolated_config` fixture in
 ```
 nethealth/
 ├── nethealth/
-│   ├── checks/         # dns, ping, http, port, traceroute, speed, wifi, ping_monitor, packet_sniffer
+│   ├── checks/         # dns, ping, http, port, ssl, traceroute, speed, wifi, gateway, public_ip, ping_monitor, packet_sniffer
 │   ├── cli.py          # Click entry point
 │   ├── tui.py          # Textual TUI
 │   ├── output.py       # shared Rich formatting

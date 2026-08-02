@@ -467,6 +467,42 @@ def wifi():
 
 
 @cli.command()
+def gateway():
+    """Ping the default gateway -- first-hop reachability, before DNS/HTTP."""
+    from nethealth.checks.gateway import gateway_check
+
+    result = gateway_check()
+
+    if result["status"] != "ok":
+        console.print(f"\n[red]❌ Gateway:[/red] {result.get('error', 'unreachable')}\n")
+        return
+
+    gw = result["gateway"]
+    avg = result.get("avg_ms")
+    avg_s = f"{avg:.1f} ms" if avg is not None else "?"
+    console.print(f"\n  🌐 Gateway: [bold]{gw}[/bold]  [green]{avg_s}[/green]\n")
+
+
+@cli.command()
+@click.option("--json", "output_json", is_flag=True, help="Output raw JSON")
+def ip(output_json):
+    """Show your current public/external IP address."""
+    from nethealth.checks.public_ip import public_ip_check
+
+    result = public_ip_check()
+
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+
+    if result["status"] != "ok":
+        console.print(f"\n[red]❌ Public IP:[/red] {result.get('error', 'unknown error')}\n")
+        return
+
+    console.print(f"\n  🌍 Public IP: [bold]{result['ip']}[/bold]\n")
+
+
+@cli.command()
 @click.argument("host")
 @click.option("--port", default=443, show_default=True, type=int, help="Port to check")
 @click.option("--json", "output_json", is_flag=True, help="Output raw JSON")

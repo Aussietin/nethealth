@@ -31,6 +31,7 @@ from textual.widgets import (
 from nethealth import config as cfg_mod
 from nethealth import alerts as alerts_mod
 from nethealth.checks.dns import dns_check
+from nethealth.checks.gateway import gateway_check
 from nethealth.checks.http import http_check
 from nethealth.checks.ping import ping_check
 from nethealth.checks.port import port_check
@@ -42,6 +43,7 @@ from nethealth.report import generate_report
 
 MAX_SPARKLINE_POINTS = 60
 WIFI_REFRESH_INTERVAL = 60
+GATEWAY_REFRESH_INTERVAL = 60
 
 _COL_TARGET  = "Target"
 _COL_DNS     = "DNS"
@@ -77,6 +79,30 @@ def _checking_cell() -> Text:
     return Text("…", style="yellow")
 
 
+def _http_display(http_r: dict) -> tuple[str, bool]:
+    """Return (label, display_ok) for an HTTP check result.
+
+    http_check() reports status "ok" whenever the *connection* succeeded,
+    even for a 404 or 500 response -- that's the right transport-level
+    semantic for alerts (a 500 isn't "the network is down"), but at a
+    glance a green cell showing "500" reads as healthy. This only affects
+    display colour (both here and in the detail screen), not the stored
+    status/alerts: a 4xx/5xx response is shown as a problem even though
+    status stays "ok" underneath -- reachable-but-erroring isn't healthy
+    at a glance, whatever the transport layer thinks.
+    """
+    if http_r.get("status") != "ok":
+        return http_r.get("error", "fail"), False
+
+    code = http_r.get("code")
+    label = str(code) if code is not None else "?"
+    if http_r.get("scheme") == "http":
+        label += " (http)"
+
+    display_ok = code is not None and code < 400
+    return label, display_ok
+
+
 def _render_wifi_text(result: dict) -> str:
     if result.get("status") != "ok" or result.get("connected") is False:
         msg = result.get("error") or result.get("note") or "not connected"
@@ -94,6 +120,17 @@ def _render_wifi_text(result: dict) -> str:
     if band:
         parts.append(f"[dim]{band}[/dim]")
     return "  ".join(parts)
+
+
+def _render_gateway_text(result: dict) -> str:
+    if result.get("status") != "ok":
+        msg = result.get("error", "unreachable")
+        return f"[red]⚠ gateway: {msg}[/red]"
+
+    gw = result.get("gateway", "?")
+    avg = result.get("avg_ms")
+    avg_s = f"{avg:.0f} ms" if avg is not None else "?"
+    return f"[dim]gw[/dim] [bold]{gw}[/bold] [green]{avg_s}[/green]"
 
 
 class AddTargetScreen(ModalScreen):
@@ -189,8 +226,8 @@ class TargetDetailScreen(ModalScreen):
             loss = data.get("loss_pct", 0.0)
             line("Ping", ok, f"{avg:.0f} ms  loss {loss:.0f}%" if (ok and avg is not None) else "fail")
         if http_r:
-            ok = http_r["status"] == "ok"
-            line("HTTP", ok, f"{http_r.get('code', '?')}" if ok else http_r.get("error", "fail"))
+            label, display_ok = _http_display(http_r)
+            line("HTTP", display_ok, label)
         if port_r:
             open_p = [str(x["port"]) for x in port_r.get("results", []) if x["status"] == "open"]
             line("Port", bool(open_p), ", ".join(open_p) if open_p else "none open")
@@ -490,6 +527,10 @@ class NetHealthTUI(App):
         width: 1fr;
         padding: 0 1;
     }
+    #gateway-status {
+        width: auto;
+        padding: 0 1;
+    }
     #health-status {
         width: 1fr;
         padding: 0 1;
@@ -541,6 +582,7 @@ class NetHealthTUI(App):
         yield Header()
         with Horizontal(id="info-bar"):
             yield Static(id="wifi-status")
+            yield Static(id="gateway-status")
             yield Static(id="health-status")
         with TabbedContent(initial="monitor"):
             with TabPane("  Monitor  ", id="monitor"):
@@ -576,8 +618,10 @@ class NetHealthTUI(App):
         self._update_health_bar()
         self.set_interval(self._refresh, self._auto_refresh)
         self.set_interval(WIFI_REFRESH_INTERVAL, self._refresh_wifi)
+        self.set_interval(GATEWAY_REFRESH_INTERVAL, self._refresh_gateway)
         self.action_refresh()
         self._refresh_wifi()
+        self._refresh_gateway()
 
     # ── Sparklines ────────────────────────────────────────────────────────────
 
@@ -848,6 +892,22 @@ class NetHealthTUI(App):
     def _update_wifi_bar(self, result: dict) -> None:
         self.query_one("#wifi-status", Static).update(_render_wifi_text(result))
 
+    # ── Gateway bar ───────────────────────────────────────────────────────────
+    # System-level check like WiFi (not per-target): "am I on the network
+    # at all" before DNS/HTTP/etc even get involved. Same refresh cadence
+    # and thread-worker pattern as _refresh_wifi.
+
+    @work(thread=True)
+    def _refresh_gateway(self) -> None:
+        try:
+            result = gateway_check()
+        except Exception as exc:
+            result = {"status": "fail", "error": str(exc)}
+        self.call_from_thread(self._update_gateway_bar, result)
+
+    def _update_gateway_bar(self, result: dict) -> None:
+        self.query_one("#gateway-status", Static).update(_render_gateway_text(result))
+
     # ── Health summary bar ───────────────────────────────────────────────────
 
     def _update_health_bar(self) -> None:
@@ -855,11 +915,17 @@ class NetHealthTUI(App):
         if total == 0:
             text = "[dim]No targets — press t or open the command palette (ctrl+p) to add one[/dim]"
         else:
+            def _target_healthy(data: dict) -> bool:
+                if not all(data[k]["status"] == "ok" for k in ("dns", "ping", "port", "ssl")):
+                    return False
+                # http_display_ok, not raw status -- see _http_display: a
+                # reachable-but-erroring 4xx/5xx shouldn't count towards
+                # "healthy" here any more than it shows green in the table.
+                return _http_display(data["http"])[1]
+
             healthy = sum(
                 1 for t in self._targets
-                if t in self._latest and all(
-                    self._latest[t][k]["status"] == "ok" for k in ("dns", "ping", "http", "port", "ssl")
-                )
+                if t in self._latest and _target_healthy(self._latest[t])
             )
             color = "green" if healthy == total else ("yellow" if healthy else "red")
             state = "[yellow]paused[/yellow]" if self._paused else f"every {self._refresh}s"
@@ -955,7 +1021,8 @@ class NetHealthTUI(App):
         # Cells
         dns_cell  = _cell(f"{dns_r.get('latency',0):.0f} ms",        _ok(dns_r))  if _ok(dns_r)  else _cell("FAIL", False)
         ping_cell = _cell(f"{avg:.0f} ms  loss {loss_pct:.0f}%", ping_ok) if (ping_ok and avg) else _cell("FAIL", False)
-        http_cell = _cell(f"{http_r.get('code','?')}",                _ok(http_r)) if _ok(http_r) else _cell("FAIL", False)
+        http_label, http_display_ok = _http_display(http_r)
+        http_cell = _cell(http_label, http_display_ok)
         open_p    = [str(x["port"]) for x in port_r.get("results",[]) if x["status"]=="open"]
         port_cell = _cell(",".join(open_p), True) if open_p else _cell("closed", False)
         if _ok(ssl_r):
@@ -985,8 +1052,12 @@ class NetHealthTUI(App):
         }
         self._update_health_bar()
 
-        all_ok = all(_ok(r) for r in [dns_r, ping_r, http_r, port_r])
-        icons  = "".join("✓" if _ok(r) else "✗" for r in [dns_r, ping_r, http_r, port_r])
+        # http_display_ok (not _ok(http_r)) so a reachable-but-erroring
+        # 4xx/5xx response shows as a failure here too, matching the red
+        # table cell instead of contradicting it with a green checkmark.
+        check_oks = [_ok(dns_r), _ok(ping_r), http_display_ok, _ok(port_r)]
+        all_ok = all(check_oks)
+        icons  = "".join("✓" if ok else "✗" for ok in check_oks)
         color  = "green" if all_ok else "red"
         self._log(
             f"[{color}]{icons}[/{color}] [bold]{target}[/bold]"

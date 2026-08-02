@@ -69,6 +69,50 @@ def test_http_check_connection_error(monkeypatch):
     assert 'error' in result
 
 
+def test_http_check_falls_back_to_http_on_connect_error(monkeypatch):
+    """A LAN device with no TLS at all (router, printer, IoT gear) should
+    still show reachable via the http:// fallback instead of always FAIL."""
+    calls = []
+
+    def _fake_get(url, timeout=5.0):
+        calls.append(url)
+        if url.startswith('https://'):
+            raise http_mod.httpx.ConnectError('refused')
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(http_mod.httpx, 'get', _fake_get)
+    result = http_mod.http_check('router.lan')
+    assert result['status'] == 'ok'
+    assert result['scheme'] == 'http'
+    assert calls == ['https://router.lan', 'http://router.lan']
+
+
+def test_http_check_does_not_fall_back_on_non_connect_error(monkeypatch):
+    """Only a connection-level failure triggers the http:// retry -- a
+    timeout or any other RequestError should fail straight away rather
+    than doubling every slow check's latency."""
+    calls = []
+
+    def _fake_get(url, timeout=5.0):
+        calls.append(url)
+        raise http_mod.httpx.ReadTimeout('slow')
+
+    monkeypatch.setattr(http_mod.httpx, 'get', _fake_get)
+    result = http_mod.http_check('slow.example')
+    assert result['status'] == 'fail'
+    assert calls == ['https://slow.example']
+
+
+def test_http_check_reports_https_error_when_both_schemes_fail(monkeypatch):
+    def _fake_get(url, timeout=5.0):
+        raise http_mod.httpx.ConnectError(f'refused: {url}')
+
+    monkeypatch.setattr(http_mod.httpx, 'get', _fake_get)
+    result = http_mod.http_check('dead.invalid')
+    assert result['status'] == 'fail'
+    assert 'https://dead.invalid' in result['error']
+
+
 # ── Port ─────────────────────────────────────────────────────────────────
 
 def test_port_check_open(monkeypatch):
