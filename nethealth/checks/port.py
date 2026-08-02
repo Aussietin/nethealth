@@ -1,16 +1,23 @@
+from __future__ import annotations
+
 import socket
 
 
-def port_check(target, port=None, ports=None, timeout=2):
+def port_check(
+    target: str,
+    port: int | None = None,
+    ports: list[int] | None = None,
+    timeout: int = 2,
+) -> dict:
     """
     Check if a port or list of ports is open on the target host.
-    
+
     Args:
         target (str): The hostname or IP to check.
         port (int, optional): A single port to check.
         ports (list, optional): A list of ports to check.
         timeout (int): Socket timeout in seconds.
-    
+
     Returns:
         dict: Result containing 'status', 'results' (list of port statuses), and 'target'.
     """

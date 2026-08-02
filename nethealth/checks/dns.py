@@ -1,14 +1,17 @@
-import dns.resolver
+from __future__ import annotations
+
 import time
 
+import dns.resolver
 
-def dns_check(host):
+
+def dns_check(host: str) -> dict:
     """
     Perform a DNS resolution check.
-    
+
     Args:
         host (str): The hostname to resolve.
-    
+
     Returns:
         dict: Result containing 'status', 'latency' (ms).
     """

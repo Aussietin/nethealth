@@ -163,7 +163,8 @@ nethealth/
 │   ├── checks/         # dns, ping, http, port, ssl, traceroute, speed, wifi, gateway, public_ip, ping_monitor, packet_sniffer
 │   ├── cli.py          # Click entry point
 │   ├── tui.py          # Textual TUI
-│   ├── output.py       # shared Rich formatting
+│   ├── config.py       # ~/.nethealth/config.toml load/save
+│   ├── alerts.py       # desktop notification + webhook on check failure
 │   └── report.py       # history aggregation
 └── pyproject.toml
 ```

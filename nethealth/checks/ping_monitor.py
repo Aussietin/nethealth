@@ -1,12 +1,15 @@
+from __future__ import annotations
+
 import subprocess
-import time
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from typing import IO
 
 
-def _ping_target(target, log_file):
+def _ping_target(target: str, log_file: IO[str]) -> bool:
     """Internal helper to ping a single target and log it."""
     timestamp = datetime.utcnow().isoformat(timespec="seconds")
     try:
@@ -36,11 +39,11 @@ def _ping_target(target, log_file):
 
 
 def monitor_ping(
-    targets,
-    interval=1,
-    duration=300,
-    log_dir="nethealth-logs",
-):
+    targets: list[str],
+    interval: int = 1,
+    duration: int = 300,
+    log_dir: str = "nethealth-logs",
+) -> bool:
     """
     Long-running, concurrent, timestamped ping monitor.
     """

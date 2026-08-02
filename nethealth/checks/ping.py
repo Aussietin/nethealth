@@ -1,15 +1,17 @@
-import subprocess
+from __future__ import annotations
+
 import re
+import subprocess
 
 
-def ping_check(host):
+def ping_check(host: str) -> dict:
     """
     Run a bounded ICMP ping using the system ping command.
     Safe for WSL (no raw sockets).
-    
+
     Args:
         host (str): The hostname or IP to ping.
-    
+
     Returns:
         dict: Result containing 'status' and 'avg_ms'.
     """
