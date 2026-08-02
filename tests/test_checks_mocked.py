@@ -149,6 +149,46 @@ def test_port_check_default_ports_used_when_none_given(monkeypatch):
     assert checked_ports == [22, 80, 443]
 
 
+def test_port_check_probes_concurrently_not_sequentially(monkeypatch):
+    """Each simulated port takes 0.3s to time out. Checked sequentially,
+    5 ports would take >=1.5s; checked concurrently (the whole point of
+    ThreadPoolExecutor in port_check) it should take roughly one slot,
+    not five. Generous threshold to avoid CI-timing flakiness -- this is
+    checking "clearly parallel" not measuring exact wall time."""
+    import time
+
+    def _slow_timeout(addr, timeout):
+        time.sleep(0.3)
+        raise socket.timeout()
+
+    monkeypatch.setattr(port_mod.socket, 'create_connection', _slow_timeout)
+    start = time.time()
+    result = port_mod.port_check('example.com', ports=[10001, 10002, 10003, 10004, 10005])
+    elapsed = time.time() - start
+
+    assert len(result['results']) == 5
+    assert elapsed < 1.0  # would be >=1.5s if sequential
+
+
+def test_port_check_preserves_input_order_under_concurrency(monkeypatch):
+    """executor.map preserves input order regardless of which port's probe
+    finishes first -- vary the fake per-port delay to actually exercise
+    that (rather than every mock returning instantly, which wouldn't
+    prove ordering survives out-of-order completion)."""
+    import time
+
+    def _variable_delay(addr, timeout):
+        port = addr[1]
+        # Higher port numbers "finish" first.
+        time.sleep(0.05 * (10005 - port) / 1000)
+        raise socket.timeout()
+
+    monkeypatch.setattr(port_mod.socket, 'create_connection', _variable_delay)
+    ports = [10001, 10002, 10003, 10004, 10005]
+    result = port_mod.port_check('example.com', ports=ports)
+    assert [r['port'] for r in result['results']] == ports
+
+
 # ── Ping ─────────────────────────────────────────────────────────────────
 
 def test_ping_check_ok(monkeypatch):
