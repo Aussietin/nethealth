@@ -15,6 +15,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     Footer,
     Header,
@@ -261,7 +262,9 @@ class SettingsScreen(ModalScreen):
     }
     #settings-dialog Label { margin-top: 1; }
     #settings-warning { color: $warning; margin-top: 1; }
-    #settings-buttons { margin-top: 1; height: 3; align-horizontal: right; }
+    #settings-checkboxes { height: auto; margin-top: 1; }
+    #settings-checkboxes Checkbox { margin-right: 2; }
+    #settings-buttons { margin-top: 1; height: auto; align-horizontal: right; }
     #settings-buttons Button { margin-left: 1; }
     """
 
@@ -273,6 +276,7 @@ class SettingsScreen(ModalScreen):
         data, error = cfg_mod.load_with_status()
         defaults_ = data.get("defaults", {})
         alerts_   = data.get("alerts", {})
+        speed_    = data.get("speed", {})
 
         with Vertical(id="settings-dialog"):
             yield Label("[bold]nethealth settings[/bold]  [dim]~/.nethealth/config.toml[/dim]")
@@ -287,21 +291,43 @@ class SettingsScreen(ModalScreen):
                 value=", ".join(defaults_.get("targets", [])),
                 placeholder="google.com, 1.1.1.1",
                 id="settings-targets",
+                compact=True,
             )
             yield Label("Refresh interval (seconds):")
             yield Input(
                 value=str(defaults_.get("refresh_interval", 30)),
                 id="settings-interval",
+                compact=True,
             )
             yield Label("Alert webhook URL (optional):")
             yield Input(
                 value=alerts_.get("webhook_url", "") or "",
                 placeholder="https://…",
                 id="settings-webhook",
+                compact=True,
+            )
+            with Horizontal(id="settings-checkboxes"):
+                yield Checkbox(
+                    "Enable alerts",
+                    value=bool(alerts_.get("enabled", True)),
+                    id="settings-alerts-enabled",
+                    compact=True,
+                )
+                yield Checkbox(
+                    "Desktop notifications",
+                    value=bool(alerts_.get("desktop", True)),
+                    id="settings-alerts-desktop",
+                    compact=True,
+                )
+            yield Label("Speed test download size (MB):")
+            yield Input(
+                value=str(speed_.get("size_mb", 10)),
+                id="settings-speed-size",
+                compact=True,
             )
             with Horizontal(id="settings-buttons"):
-                yield Button("Cancel", id="settings-cancel")
-                yield Button("Save", id="settings-save", variant="primary")
+                yield Button("Cancel", id="settings-cancel", compact=True)
+                yield Button("Save", id="settings-save", variant="primary", compact=True)
 
     def on_mount(self) -> None:
         self.query_one("#settings-targets", Input).focus()
@@ -319,6 +345,9 @@ class SettingsScreen(ModalScreen):
         targets_raw  = self.query_one("#settings-targets", Input).value
         interval_raw = self.query_one("#settings-interval", Input).value.strip()
         webhook      = self.query_one("#settings-webhook", Input).value.strip()
+        size_raw     = self.query_one("#settings-speed-size", Input).value.strip()
+        alerts_on    = self.query_one("#settings-alerts-enabled", Checkbox).value
+        desktop_on   = self.query_one("#settings-alerts-desktop", Checkbox).value
 
         targets = [t.strip() for t in targets_raw.split(",") if t.strip()]
         if not targets:
@@ -336,12 +365,27 @@ class SettingsScreen(ModalScreen):
             )
             return
 
+        try:
+            size_mb = int(size_raw)
+            if size_mb <= 0:
+                raise ValueError
+        except ValueError:
+            self.app.notify(
+                "Speed test size must be a positive whole number of MB",
+                severity="error",
+            )
+            return
+
         data, _ = cfg_mod.load_with_status()
         data.setdefault("defaults", {})
         data["defaults"]["targets"] = targets
         data["defaults"]["refresh_interval"] = interval
         data.setdefault("alerts", {})
         data["alerts"]["webhook_url"] = webhook
+        data["alerts"]["enabled"] = alerts_on
+        data["alerts"]["desktop"] = desktop_on
+        data.setdefault("speed", {})
+        data["speed"]["size_mb"] = size_mb
 
         try:
             cfg_mod.save(data)
@@ -349,7 +393,71 @@ class SettingsScreen(ModalScreen):
             self.app.notify(f"Could not write config file: {exc}", severity="error")
             return
 
-        self.dismiss({"targets": targets, "refresh_interval": interval, "webhook_url": webhook})
+        self.dismiss({
+            "targets": targets,
+            "refresh_interval": interval,
+            "webhook_url": webhook,
+            "alerts_enabled": alerts_on,
+            "alerts_desktop": desktop_on,
+            "speed_size_mb": size_mb,
+        })
+
+
+class HelpScreen(ModalScreen):
+    """Keybinding reference. Built from the live NetHealthTUI.BINDINGS list
+    (passed in by the caller) rather than a hand-maintained string, so it
+    can't drift out of sync with the actual keys the way the README's
+    keybinding line already had once before."""
+
+    DEFAULT_CSS = """
+    HelpScreen { align: center middle; }
+    #help-dialog {
+        background: $surface;
+        border: solid $accent;
+        padding: 1 2;
+        width: 62;
+        height: auto;
+        max-height: 80%;
+    }
+    #help-title { margin-bottom: 1; }
+    #help-body { height: 18; }
+    """
+
+    BINDINGS: ClassVar[list] = [
+        Binding("escape", "dismiss_screen", "Close"),
+        Binding("question_mark", "dismiss_screen", "Close", show=False),
+    ]
+
+    def __init__(self, bindings: list[Binding]) -> None:
+        super().__init__()
+        # NOT self._bindings -- every DOMNode already has a real internal
+        # `_bindings` attribute (a BindingsMap built from the class's
+        # BINDINGS list). Overwriting it with our plain list here breaks
+        # Textual's own key dispatch for this screen with a confusing
+        # `AttributeError: 'list' object has no attribute
+        # 'key_to_bindings'` the moment any key is pressed -- same class of
+        # bug as the documented _render/Widget._render() collision, just a
+        # different private name this time. Caught by the pilot test for
+        # this screen, not by import/syntax checks.
+        self._help_bindings = bindings
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-dialog"):
+            yield Label("[bold]nethealth keybindings[/bold]  [dim](Esc or ? to close)[/dim]", id="help-title")
+            yield RichLog(id="help-body", highlight=False, markup=True, wrap=False)
+
+    def on_mount(self) -> None:
+        log = self.query_one("#help-body", RichLog)
+        for b in self._help_bindings:
+            if not b.description:
+                continue
+            key_label = b.key.replace("slash", "/").replace("question_mark", "?")
+            log.write(f"  [bold cyan]{key_label:<10}[/bold cyan] {b.description}")
+        log.write("")
+        log.write("  [dim]Ctrl+P — searchable command palette: every action above, plus tab switching.[/dim]")
+
+    def action_dismiss_screen(self) -> None:
+        self.dismiss()
 
 
 class NetHealthTUI(App):
@@ -366,6 +474,7 @@ class NetHealthTUI(App):
         Binding("slash", "toggle_filter", "Filter"),
         Binding("escape", "clear_filter", "Clear filter", show=False),
         Binding("c",   "open_settings", "Settings"),
+        Binding("question_mark", "open_help", "Help"),
         Binding("1",   "show_tab('monitor')", "Monitor",  show=False),
         Binding("2",   "show_tab('log')",     "Log",      show=False),
         Binding("3",   "show_tab('report')",  "Report",   show=False),
@@ -461,7 +570,7 @@ class NetHealthTUI(App):
 
         self._log(f"[cyan]nethealth TUI[/cyan] — watching {len(self._targets)} target(s)  "
                   f"[dim]refresh every {self._refresh}s · keys: r refresh · t add · d remove · "
-                  f"p pause · s speed test · / filter · c settings · enter details · "
+                  f"p pause · s speed test · / filter · c settings · ? help · enter details · "
                   f"ctrl+p commands · 1/2/3 tabs · q quit[/dim]")
 
         self._update_health_bar()
@@ -500,7 +609,12 @@ class NetHealthTUI(App):
         whatever matches self._filter. Uses cached cell values from the
         last check cycle (self._latest_cells) so filtering doesn't blank
         out data that's already known — background checks keep running
-        for every target regardless of what's currently visible."""
+        for every target regardless of what's currently visible.
+
+        Also toggles the sparkline panel to match, so the whole Monitor
+        tab narrows together instead of the table filtering while the
+        latency panel keeps showing everything (which was the state after
+        round 1 -- narrowing only the table looked like a bug)."""
         table = self.query_one(DataTable)
         table.clear()
         checking = (_checking_cell(),) * 5 + ("—",)
@@ -509,6 +623,13 @@ class NetHealthTUI(App):
                 continue
             cells = self._latest_cells.get(target, checking)
             table.add_row(target, *cells, key=target)
+
+        for target, spark in self._sparklines.items():
+            visible = self._target_matches(target)
+            spark.display = visible
+            label = self._spark_labels.get(target)
+            if label is not None:
+                label.display = visible
 
     def action_toggle_filter(self) -> None:
         filt = self.query_one("#filter-input", Input)
@@ -543,7 +664,10 @@ class NetHealthTUI(App):
         def on_dismiss(result: dict | None) -> None:
             if result is None:
                 return
-            # Alert config (webhook) is cheap to hot-apply immediately.
+            # Alert config (enabled/desktop/webhook) and the speed test's
+            # default size are cheap to hot-apply immediately -- both are
+            # read fresh from config.toml on every use rather than cached
+            # at startup, so there's no timer/loop to restart.
             self._alert_cfg = cfg_mod.alert_cfg()
             # Default targets / refresh interval are persisted to the config
             # file but only take effect on the *next* TUI launch — this
@@ -553,10 +677,11 @@ class NetHealthTUI(App):
             self._log(
                 f"[green]Settings saved[/green] — {len(result['targets'])} default target(s), "
                 f"refresh {result['refresh_interval']}s, webhook "
-                f"{'set' if result['webhook_url'] else 'cleared'}"
+                f"{'set' if result['webhook_url'] else 'cleared'}, "
+                f"alerts {'on' if result['alerts_enabled'] else 'off'}"
             )
             self.notify(
-                "Saved. Alert webhook applied immediately — "
+                "Saved. Alerts/webhook/speed-size applied immediately — "
                 "default targets and refresh interval take effect next launch.",
                 title="Settings",
                 severity="information",
@@ -564,6 +689,11 @@ class NetHealthTUI(App):
             )
 
         self.push_screen(SettingsScreen(), on_dismiss)
+
+    # ── Help ──────────────────────────────────────────────────────────────────
+
+    def action_open_help(self) -> None:
+        self.push_screen(HelpScreen(self.BINDINGS))
 
     # ── Row selection → detail screen ────────────────────────────────────────
 
@@ -601,6 +731,7 @@ class NetHealthTUI(App):
         if self._filter:
             yield SystemCommand("Clear filter", "Show all targets in the Monitor table", self.action_clear_filter)
         yield SystemCommand("Settings", "View and edit ~/.nethealth/config.toml", self.action_open_settings)
+        yield SystemCommand("Help / keybindings", "Show the full keybinding reference", self.action_open_help)
         yield SystemCommand("Monitor tab", "Switch to the Monitor tab", lambda: self.action_show_tab("monitor"))
         yield SystemCommand("Log tab", "Switch to the Log tab", lambda: self.action_show_tab("log"))
         yield SystemCommand("Report tab", "Switch to the Report tab", lambda: self.action_show_tab("report"))
@@ -737,6 +868,12 @@ class NetHealthTUI(App):
                 f"[{color}]●[/{color}] {healthy}/{total} healthy   "
                 f"[dim]refresh {state} · last {now}[/dim]"
             )
+            if self._filter:
+                shown = sum(1 for t in self._targets if self._target_matches(t))
+                # Deliberately loud (not [dim]) -- forgetting a filter is
+                # active and wondering why targets "disappeared" is exactly
+                # the confusion this is here to prevent.
+                text += f"   [cyan]/ showing {shown}/{total} matching '{self._filter}'[/cyan]"
         self.query_one("#health-status", Static).update(text)
 
     # ── Worker ────────────────────────────────────────────────────────────────
