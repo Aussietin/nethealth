@@ -8,7 +8,13 @@ from typing import Any
 HISTORY_PATH = Path.home() / ".nethealth" / "history.json"
 
 
-def _load_history(path: Path = HISTORY_PATH) -> list[dict]:
+def _load_history(path: Path | None = None) -> list[dict]:
+    # `path` defaults via `or` rather than `path: Path = HISTORY_PATH` in the
+    # signature -- a default *parameter value* is bound once at function
+    # definition time, so it would silently keep pointing at whatever
+    # HISTORY_PATH was when this module was first imported even if the
+    # module-level constant is reassigned later (as tests do).
+    path = path or HISTORY_PATH
     if not path.exists():
         return []
     try:

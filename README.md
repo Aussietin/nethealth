@@ -138,6 +138,21 @@ Captures raw Ethernet frames, parses IPv4/TCP/UDP/ICMP headers. Requires root.
 
 ---
 
+## Testing
+
+```bash
+pip install -e '.[dev]'   # pytest + pytest-asyncio, dev-only extras
+pytest                     # ~40 tests: config/report/wifi-parsing unit tests,
+                            # mocked check-function tests, headless Textual
+                            # pilot tests (app.run_test() + Pilot) for the TUI
+```
+
+Nothing in the suite touches your real `~/.nethealth/` — TUI and config tests
+run against an isolated tmp directory via the `isolated_config` fixture in
+`tests/conftest.py`.
+
+---
+
 ## Project structure
 
 ```
