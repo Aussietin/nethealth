@@ -143,6 +143,46 @@ async def test_help_screen_lists_real_bindings():
 
 
 @pytest.mark.asyncio
+async def test_help_screen_shows_plain_language_guide():
+    """The Help screen leads with a jargon-light "what am I looking at"
+    section before the keybindings (batch-4 ease-of-use work)."""
+    app = NetHealthTUI(["google.com"], refresh_interval=9999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await pilot.pause()
+
+        from textual.widgets import RichLog
+        log = app.screen.query_one("#help-body", RichLog)
+        text = "\n".join(str(line) for line in log.lines)
+        assert "What am I looking at?" in text
+        assert "Report" in text and "fills" in text
+        # guide comes before the key list
+        assert text.index("What am I looking at?") < text.index("Quit")
+
+
+@pytest.mark.asyncio
+async def test_first_run_logs_guide_hint(tmp_path, monkeypatch):
+    """With no history file yet, the TUI nudges a first-time user toward `?`."""
+    monkeypatch.setattr("nethealth.tui.report_mod.HISTORY_PATH", tmp_path / "nope.json")
+    app = NetHealthTUI(["google.com"], refresh_interval=9999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._first_run_hint_shown is True
+
+
+@pytest.mark.asyncio
+async def test_no_first_run_hint_when_history_exists(tmp_path, monkeypatch):
+    hist = tmp_path / "history.json"
+    hist.write_text("[]")
+    monkeypatch.setattr("nethealth.tui.report_mod.HISTORY_PATH", hist)
+    app = NetHealthTUI(["google.com"], refresh_interval=9999)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._first_run_hint_shown is False
+
+
+@pytest.mark.asyncio
 async def test_command_palette_lists_help_action():
     app = NetHealthTUI(["google.com"], refresh_interval=9999)
     async with app.run_test() as pilot:

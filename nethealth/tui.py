@@ -40,6 +40,7 @@ from nethealth.checks.speed import speed_check
 from nethealth.checks.ssl import ssl_check
 from nethealth.checks.traceroute import traceroute_check
 from nethealth.checks.wifi import wifi_check
+from nethealth import report as report_mod
 from nethealth.report import generate_report, record_check
 
 MAX_SPARKLINE_POINTS = 60
@@ -448,10 +449,40 @@ class SettingsScreen(ModalScreen):
 
 
 class HelpScreen(ModalScreen):
-    """Keybinding reference. Built from the live NetHealthTUI.BINDINGS list
-    (passed in by the caller) rather than a hand-maintained string, so it
+    """Plain-language "what am I looking at" guide, followed by a keybinding
+    reference. The keybinding half is built from the live NetHealthTUI.BINDINGS
+    list (passed in by the caller) rather than a hand-maintained string, so it
     can't drift out of sync with the actual keys the way the README's
     keybinding line already had once before."""
+
+    # One plain sentence per thing on screen -- no jargon in the first clause,
+    # the technical name in brackets after. Edited here, not duplicated in a
+    # test, so keep it readable.
+    GUIDE_LINES: ClassVar[list[str]] = [
+        "[bold]What am I looking at?[/bold]",
+        "",
+        "  This watches a few internet addresses and re-checks them every",
+        "  several seconds. Green means that part is working, red means it",
+        "  isn't, yellow means it's slow or partly working.",
+        "",
+        "  [bold]Columns[/bold] (one row per address):",
+        "    DNS   — can your computer look up the address (turn a name into a number)",
+        "    Ping  — how fast it replies, in milliseconds; lower is better",
+        "    HTTP  — can a web request to it succeed",
+        "    Port  — are the expected doors (80/443) open",
+        "    SSL   — days until its security certificate expires",
+        "",
+        "  [bold]The bar under the title[/bold]: your WiFi signal, whether your",
+        "  router is reachable, and an X/Y-healthy count for all addresses.",
+        "",
+        "  [bold]Right side[/bold]: a mini graph of recent ping times per address.",
+        "",
+        "  [bold]Tabs[/bold] (keys 1/2/3): Monitor (this view) · Log (what happened,",
+        "  newest last) · Report (pass rates and averages over time — it fills",
+        "  in on its own the longer you leave this open).",
+        "",
+        "[bold]Keys[/bold]",
+    ]
 
     DEFAULT_CSS = """
     HelpScreen { align: center middle; }
@@ -459,12 +490,12 @@ class HelpScreen(ModalScreen):
         background: $surface;
         border: solid $accent;
         padding: 1 2;
-        width: 62;
+        width: 76;
         height: auto;
-        max-height: 80%;
+        max-height: 90%;
     }
     #help-title { margin-bottom: 1; }
-    #help-body { height: 18; }
+    #help-body { height: 30; }
     """
 
     BINDINGS: ClassVar[list] = [
@@ -487,11 +518,13 @@ class HelpScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="help-dialog"):
-            yield Label("[bold]nethealth keybindings[/bold]  [dim](Esc or ? to close)[/dim]", id="help-title")
+            yield Label("[bold]nethealth — quick guide[/bold]  [dim](Esc or ? to close)[/dim]", id="help-title")
             yield RichLog(id="help-body", highlight=False, markup=True, wrap=False)
 
     def on_mount(self) -> None:
         log = self.query_one("#help-body", RichLog)
+        for line in self.GUIDE_LINES:
+            log.write(f"  {line}" if line else "")
         for b in self._help_bindings:
             if not b.description:
                 continue
@@ -624,6 +657,20 @@ class NetHealthTUI(App):
                   f"[dim]refresh every {self._refresh}s · keys: r refresh · t add · d remove · "
                   f"p pause · s speed test · / filter · c settings · ? help · enter details · "
                   f"ctrl+p commands · 1/2/3 tabs · q quit[/dim]")
+
+        # First-run nudge: if there's no history yet, this is very likely
+        # someone's first time in the TUI -- point them at the guide once,
+        # via a non-blocking toast (never a modal on mount -- that would eat
+        # the first keypress). Stops appearing on its own once checks have
+        # been recorded for a few minutes.
+        self._first_run_hint_shown = not report_mod.HISTORY_PATH.exists()
+        if self._first_run_hint_shown:
+            self._log("[yellow]First time here? Press [bold]?[/bold] for a plain-language guide "
+                      "to what everything on screen means.[/yellow]")
+            self.call_later(lambda: self.notify(
+                "Press ? any time for a guide to what you're looking at.",
+                title="Welcome to nethealth",
+            ))
 
         self._update_health_bar()
         self.set_interval(self._refresh, self._auto_refresh)
