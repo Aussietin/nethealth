@@ -95,10 +95,16 @@ def _save_history(target: str, results: dict, fmt: str) -> Path:
     return path
 
 
-@click.group()
-def cli():
-    """Network health diagnostics"""
-    pass
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """Network health diagnostics.
+
+    Run `nethealth` on its own for a plain-language check of whether your
+    internet is working. Use the subcommands below for detail.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(status)
 
 
 @cli.command("help", hidden=True)
@@ -173,6 +179,61 @@ def check(target, skip_traceroute, output_json, save):
     if save:
         path = _save_history(target, results, save)
         console.print(f"  [dim]Saved → {path}[/dim]\n")
+
+
+@cli.command()
+@click.argument("target", required=False)
+@click.option("--json", "output_json", is_flag=True, help="Output raw JSON")
+def status(target, output_json):
+    """Plain-language answer to 'is my internet working?' (this is the default)."""
+    from nethealth.checks.gateway import gateway_check
+    from nethealth.diagnose import diagnose
+
+    if not target:
+        try:
+            from nethealth import config as _cfg
+            targets = _cfg.defaults().get("targets") or []
+            target = targets[0] if targets else "google.com"
+        except Exception:
+            target = "google.com"
+
+    if not output_json:
+        console.print(f"\n  [dim]Checking your connection (via {target})…[/dim]")
+
+    gw = gateway_check()
+    d = dns_check(target)
+    p = ping_check(target)
+    h = http_check(target)
+
+    result = diagnose(gateway=gw, dns=d, ping=p, http=h, target=target)
+
+    if output_json:
+        click.echo(json.dumps({
+            "severity": result.severity,
+            "headline": result.headline,
+            "details": result.details,
+            "suggestions": result.suggestions,
+            "target": target,
+        }, indent=2))
+        return
+
+    icon, color = {
+        "ok":   ("✅", "green"),
+        "warn": ("⚠️ ", "yellow"),
+        "down": ("❌", "red"),
+    }[result.severity]
+
+    body = f"[bold]{icon}  {result.headline}[/bold]"
+    for line in result.details:
+        body += f"\n[dim]{line}[/dim]"
+    if result.suggestions:
+        body += "\n"
+        for s in result.suggestions:
+            body += f"\n  • {s}"
+
+    console.print()
+    console.print(Panel(body, border_style=color, expand=False))
+    console.print(f"  [dim]Full technical detail:  nethealth check {target}[/dim]\n")
 
 
 @cli.command()
