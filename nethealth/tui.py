@@ -3,6 +3,7 @@ nethealth/tui.py — Textual TUI with Monitor / Log / Report tabs.
 """
 from __future__ import annotations
 
+import time
 from collections import defaultdict, deque
 from datetime import datetime
 from typing import ClassVar
@@ -39,11 +40,17 @@ from nethealth.checks.speed import speed_check
 from nethealth.checks.ssl import ssl_check
 from nethealth.checks.traceroute import traceroute_check
 from nethealth.checks.wifi import wifi_check
-from nethealth.report import generate_report
+from nethealth.report import generate_report, record_check
 
 MAX_SPARKLINE_POINTS = 60
 WIFI_REFRESH_INTERVAL = 60
 GATEWAY_REFRESH_INTERVAL = 60
+
+# The Monitor loop refreshes every ~30s, but persisting every cycle would bloat
+# history.json (2880 entries/target/day) and make the Report noisy. Record at
+# most one snapshot per target per this many seconds so the Report tab fills
+# itself just by leaving the TUI open, without the user ever running a command.
+HISTORY_RECORD_INTERVAL = 300
 
 _COL_TARGET  = "Target"
 _COL_DNS     = "DNS"
@@ -575,6 +582,9 @@ class NetHealthTUI(App):
         self._filter:         str                     = ""
         self._alert_cfg:      dict                    = cfg_mod.alert_cfg()
         self._report_loaded:  bool                    = False
+        # {target: monotonic timestamp of last history write} -- throttles
+        # snapshot persistence to HISTORY_RECORD_INTERVAL (see _run_checks).
+        self._history_last:   dict[str, float]        = {}
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -619,6 +629,10 @@ class NetHealthTUI(App):
         self.set_interval(self._refresh, self._auto_refresh)
         self.set_interval(WIFI_REFRESH_INTERVAL, self._refresh_wifi)
         self.set_interval(GATEWAY_REFRESH_INTERVAL, self._refresh_gateway)
+        # Keep the Report tab live while it's the active tab, so a user who
+        # leaves it open watches it populate instead of having to switch away
+        # and back.
+        self.set_interval(HISTORY_RECORD_INTERVAL, self._refresh_report_if_active)
         self.action_refresh()
         self._refresh_wifi()
         self._refresh_gateway()
@@ -642,6 +656,13 @@ class NetHealthTUI(App):
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.pane and event.pane.id == "report":
             self._refresh_report()
+
+    def _refresh_report_if_active(self) -> None:
+        try:
+            if self.query_one(TabbedContent).active == "report":
+                self._refresh_report()
+        except Exception:
+            pass
 
     # ── Filter ────────────────────────────────────────────────────────────────
 
@@ -988,7 +1009,26 @@ class NetHealthTUI(App):
                 title="Recovered", severity="information", timeout=4,
             )
 
+        self._maybe_record_history(target, results_map)
+
         self.call_from_thread(self._update_ui, target, dns_r, ping_r, http_r, port_r, ssl_r)
+
+    def _maybe_record_history(self, target: str, results_map: dict) -> None:
+        """Persist a check snapshot for the Report tab, throttled per target.
+
+        Runs in the check worker thread (file IO is fine here). Failures are
+        swallowed -- a monitoring tool must never crash a refresh cycle over
+        an unwritable history file.
+        """
+        now = time.monotonic()
+        last = self._history_last.get(target, 0.0)
+        if now - last < HISTORY_RECORD_INTERVAL:
+            return
+        try:
+            record_check(target, results_map)
+            self._history_last[target] = now
+        except Exception:
+            pass
 
     # ── UI update ─────────────────────────────────────────────────────────────
 
@@ -1075,7 +1115,10 @@ class NetHealthTUI(App):
 
         if data["status"] == "empty":
             panel.write(f"[yellow]{data['message']}[/yellow]")
-            panel.write("[dim]Run: nethealth check <target> --save json[/dim]")
+            panel.write(
+                f"[dim]Recording a snapshot per target every "
+                f"{HISTORY_RECORD_INTERVAL // 60} min while this monitor is open.[/dim]"
+            )
             return
 
         dr = data["date_range"]

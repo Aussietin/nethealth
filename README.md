@@ -128,7 +128,14 @@ nethealth report --last 50     # most recent 50 runs only
 nethealth report --json
 ```
 
-Reads from `~/.nethealth/history.json`. Populate it with `nethealth check --save json`.
+Reads from `~/.nethealth/history.json`, which fills itself two ways:
+
+- **Automatically** — the monitor TUI records one snapshot per target every 5 minutes
+  while it's open, so the Report tab populates just by leaving `nethealth` running.
+- **Manually** — `nethealth check <target> --save json` appends a snapshot on demand.
+
+The Report tab in the TUI (key `3`) shows the same aggregation live and refreshes itself
+while it's the active tab.
 
 ### Packet sniffer
 

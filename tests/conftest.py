@@ -10,6 +10,15 @@ from __future__ import annotations
 import pytest
 
 from nethealth import config as cfg_mod
+from nethealth import report as report_mod
+
+
+@pytest.fixture(autouse=True)
+def _isolate_history(tmp_path, monkeypatch):
+    """No test may touch Austin's real ~/.nethealth/history.json. The TUI
+    monitor loop now records snapshots there (see tui._maybe_record_history),
+    so this guard is autouse rather than opt-in."""
+    monkeypatch.setattr(report_mod, "HISTORY_PATH", tmp_path / "history.json")
 
 
 @pytest.fixture

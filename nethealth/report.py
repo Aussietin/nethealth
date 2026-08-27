@@ -7,6 +7,46 @@ from typing import Any
 
 HISTORY_PATH = Path.home() / ".nethealth" / "history.json"
 
+# Keep the history file from growing unbounded over months of use. Shared by
+# every writer (the `check --save json` CLI path and the TUI monitor loop).
+MAX_HISTORY_ENTRIES = 5000
+
+# Only the check keys the report knows how to aggregate are persisted, so a
+# snapshot from the TUI (which also runs an SSL check) matches the shape the
+# `check` CLI writes.
+_RECORDED_CHECKS = ("dns", "ping", "http", "port")
+
+
+def record_check(target: str, results: dict, path: Path | None = None) -> Path:
+    """Append one check snapshot to history.json, trimming to MAX_HISTORY_ENTRIES.
+
+    A corrupt/unreadable history file is not fatal -- it's replaced with a
+    fresh list (the old bytes are left on disk untouched by not reading further).
+    Returns the path written.
+    """
+    path = path or HISTORY_PATH
+    path.parent.mkdir(exist_ok=True)
+
+    history: list[dict] = []
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text())
+            if isinstance(loaded, list):
+                history = loaded
+        except Exception:
+            history = []
+
+    trimmed = {k: results[k] for k in _RECORDED_CHECKS if k in results}
+    history.append({
+        "timestamp": datetime.now().isoformat(),
+        "target": target,
+        "results": trimmed,
+    })
+    if len(history) > MAX_HISTORY_ENTRIES:
+        history = history[-MAX_HISTORY_ENTRIES:]
+    path.write_text(json.dumps(history, indent=2))
+    return path
+
 
 def _load_history(path: Path | None = None) -> list[dict]:
     # `path` defaults via `or` rather than `path: Path = HISTORY_PATH` in the
@@ -30,7 +70,14 @@ def generate_report(target: str | None = None, last: int | None = None) -> dict:
     """
     entries = _load_history()
     if not entries:
-        return {"status": "empty", "message": "No history found. Run nethealth check --save json first."}
+        return {
+            "status": "empty",
+            "message": (
+                "No history yet. The report fills in automatically as checks run — "
+                "leave the nethealth monitor open for a few minutes, or run "
+                "'nethealth check google.com --save json' once to seed it."
+            ),
+        }
 
     if target:
         entries = [e for e in entries if e.get("target") == target]

@@ -93,3 +93,48 @@ def test_generate_report_last_n_limits_entries(tmp_path, monkeypatch):
 
     data = report_mod.generate_report(last=2)
     assert data['entries_total'] == 2
+
+
+def test_record_check_appends_and_trims_to_recorded_checks(tmp_path):
+    history_path = tmp_path / 'history.json'
+    results = {
+        'dns':  {'status': 'ok', 'latency': 12.0},
+        'ping': {'status': 'ok', 'avg_ms': 9.0},
+        'http': {'status': 'ok', 'code': 200},
+        'port': {'status': 'ok'},
+        'ssl':  {'status': 'ok', 'days': 40},   # not a recorded check
+    }
+    report_mod.record_check('a.test', results, path=history_path)
+    entries = json.loads(history_path.read_text())
+    assert len(entries) == 1
+    assert entries[0]['target'] == 'a.test'
+    assert set(entries[0]['results']) == {'dns', 'ping', 'http', 'port'}
+    assert 'timestamp' in entries[0]
+
+    report_mod.record_check('a.test', results, path=history_path)
+    assert len(json.loads(history_path.read_text())) == 2
+
+
+def test_record_check_recovers_from_corrupt_file(tmp_path):
+    history_path = tmp_path / 'history.json'
+    history_path.write_text('}{ not json')
+    report_mod.record_check('a.test', {'dns': {'status': 'ok'}}, path=history_path)
+    entries = json.loads(history_path.read_text())
+    assert len(entries) == 1
+
+
+def test_record_check_caps_at_max_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(report_mod, 'MAX_HISTORY_ENTRIES', 3)
+    history_path = tmp_path / 'history.json'
+    for _ in range(5):
+        report_mod.record_check('a.test', {'dns': {'status': 'ok'}}, path=history_path)
+    assert len(json.loads(history_path.read_text())) == 3
+
+
+def test_record_check_feeds_generate_report(tmp_path, monkeypatch):
+    history_path = tmp_path / 'history.json'
+    monkeypatch.setattr(report_mod, 'HISTORY_PATH', history_path)
+    report_mod.record_check('a.test', {'dns': {'status': 'ok', 'latency': 5.0}}, path=history_path)
+    data = report_mod.generate_report()
+    assert data['status'] == 'ok'
+    assert data['per_target']['a.test']['dns']['pass_pct'] == 100.0
