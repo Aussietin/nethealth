@@ -105,3 +105,15 @@ def test_status_json_output(monkeypatch):
     result = CliRunner().invoke(cli, ["status", "google.com", "--json"])
     assert result.exit_code == 0
     assert '"severity": "ok"' in result.output
+
+
+def test_check_prints_plain_language_verdict(monkeypatch):
+    import nethealth.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "dns_check", lambda t: OK_DNS)
+    monkeypatch.setattr(cli_mod, "ping_check", lambda t: OK_PING)
+    monkeypatch.setattr(cli_mod, "http_check", lambda t: {"status": "fail", "error": "boom"})
+    monkeypatch.setattr(cli_mod, "port_check", lambda t: {"status": "ok", "results": []})
+    monkeypatch.setattr(cli_mod, "traceroute_check", lambda t, **k: {"status": "ok", "hops": []})
+    result = CliRunner().invoke(cli, ["check", "example.com"])
+    assert result.exit_code == 0
+    assert "example.com isn't responding" in result.output

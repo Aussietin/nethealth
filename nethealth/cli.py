@@ -174,7 +174,14 @@ def check(target, skip_traceroute, output_json, save):
     console.print()
     console.print(Panel(f"[bold]🔎  {target}[/bold]", expand=False))
     console.print(table)
-    console.print(f"  [{color}]{icon}  {passed}/{total} checks passed[/{color}]\n")
+    console.print(f"  [{color}]{icon}  {passed}/{total} checks passed[/{color}]")
+
+    from nethealth.diagnose import diagnose
+    verdict = diagnose(
+        dns=results["dns"], ping=results["ping"], http=results["http"], target=target,
+    )
+    vcolor = {"ok": "green", "warn": "yellow", "down": "red"}[verdict.severity]
+    console.print(f"  [{vcolor}]{verdict.headline}[/{vcolor}]\n")
 
     if save:
         path = _save_history(target, results, save)
