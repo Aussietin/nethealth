@@ -1,0 +1,14 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    uses: Aussietin/.github/.github/workflows/ci-python.yml@main
+    with:
+      working-directory: "."
+      python-version: "3.11"
+      runs-on: "ubuntu-latest"
