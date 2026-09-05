@@ -16,6 +16,17 @@ MAX_HISTORY_ENTRIES = 5000
 # `check` CLI writes.
 _RECORDED_CHECKS = ("dns", "ping", "http", "port")
 
+# Number of recent samples shown in the sparkline column.
+_SPARK_SAMPLES = 20
+# Unicode block characters: ▁ = fail / poor, █ = ok / full
+_SPARK_OK   = "█"
+_SPARK_FAIL = "▁"
+
+
+def _make_sparkline(booleans: list[bool]) -> str:
+    """Convert a list of ok booleans → a Unicode block-char sparkline string."""
+    return "".join(_SPARK_OK if b else _SPARK_FAIL for b in booleans)
+
 
 def record_check(target: str, results: dict, path: Path | None = None) -> Path:
     """Append one check snapshot to history.json, trimming to MAX_HISTORY_ENTRIES.
@@ -67,6 +78,9 @@ def generate_report(target: str | None = None, last: int | None = None) -> dict:
     """
     Aggregate ~/.nethealth/history.json into per-target stats.
     Returns dict with keys: targets, date_range, entries_total, per_target.
+
+    Each per-check entry now includes a 'sparkline' string showing the
+    pass/fail trend across the last _SPARK_SAMPLES results.
     """
     entries = _load_history()
     if not entries:
@@ -105,10 +119,16 @@ def generate_report(target: str | None = None, last: int | None = None) -> dict:
                 continue
             passed = sum(1 for v in values if v.get("status") == "ok")
             total = len(values)
+
+            # Sparkline: last _SPARK_SAMPLES results, oldest → newest left to right
+            spark_window = values[-_SPARK_SAMPLES:]
+            sparkline = _make_sparkline([v.get("status") == "ok" for v in spark_window])
+
             entry: dict[str, Any] = {
                 "total": total,
                 "passed": passed,
                 "pass_pct": round(passed / total * 100, 1),
+                "sparkline": sparkline,
             }
             if check == "dns":
                 lats = [v["latency"] for v in values if v.get("status") == "ok" and "latency" in v]

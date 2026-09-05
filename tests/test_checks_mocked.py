@@ -32,6 +32,44 @@ def test_dns_check_fail(monkeypatch):
     assert 'error' in result
 
 
+def test_dns_check_uses_custom_resolver(monkeypatch):
+    seen = {}
+
+    class _FakeResolver:
+        def __init__(self, configure=True):
+            self.nameservers = []
+
+        def resolve(self, host, rtype):
+            seen['nameservers'] = self.nameservers
+            return object()
+
+    monkeypatch.setattr(dns_mod.dns.resolver, 'Resolver', _FakeResolver)
+    result = dns_mod.dns_check('example.com', resolver_addr='8.8.8.8')
+    assert result['status'] == 'ok'
+    assert result['resolver'] == '8.8.8.8'
+    assert seen['nameservers'] == ['8.8.8.8']
+
+
+def test_dns_check_custom_resolver_failure_reports_resolver(monkeypatch):
+    class _FakeResolver:
+        def __init__(self, configure=True):
+            self.nameservers = []
+
+        def resolve(self, host, rtype):
+            raise dns_mod.dns.resolver.NXDOMAIN()
+
+    monkeypatch.setattr(dns_mod.dns.resolver, 'Resolver', _FakeResolver)
+    result = dns_mod.dns_check('doesnotexist.invalid', resolver_addr='1.1.1.1')
+    assert result['status'] == 'fail'
+    assert result['resolver'] == '1.1.1.1'
+
+
+def test_dns_check_default_resolver_omits_resolver_key(monkeypatch):
+    monkeypatch.setattr(dns_mod.dns.resolver, 'resolve', lambda host, rtype: object())
+    result = dns_mod.dns_check('example.com')
+    assert 'resolver' not in result
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────
 
 class _FakeResponse:
@@ -111,6 +149,48 @@ def test_http_check_reports_https_error_when_both_schemes_fail(monkeypatch):
     result = http_mod.http_check('dead.invalid')
     assert result['status'] == 'fail'
     assert 'https://dead.invalid' in result['error']
+
+
+def test_http_check_uses_head_method(monkeypatch):
+    seen = {}
+
+    def _fake_head(url, timeout=5.0):
+        seen['called'] = True
+        return _FakeResponse(200)
+
+    def _fake_get(url, timeout=5.0):
+        seen['called_get'] = True
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(http_mod.httpx, 'head', _fake_head)
+    monkeypatch.setattr(http_mod.httpx, 'get', _fake_get)
+    result = http_mod.http_check('example.com', method='HEAD')
+    assert result['status'] == 'ok'
+    assert result['method'] == 'HEAD'
+    assert seen.get('called') is True
+    assert 'called_get' not in seen
+
+
+def test_http_check_passes_extra_headers(monkeypatch):
+    seen = {}
+
+    def _fake_get(url, timeout=5.0, headers=None):
+        seen['headers'] = headers
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(http_mod.httpx, 'get', _fake_get)
+    result = http_mod.http_check('example.com', headers={'Authorization': 'Bearer tok'})
+    assert result['status'] == 'ok'
+    assert seen['headers'] == {'Authorization': 'Bearer tok'}
+
+
+def test_http_check_default_call_has_no_headers_kwarg(monkeypatch):
+    # Regression guard: the default GET/no-headers path must call
+    # httpx.get(url, timeout=timeout) exactly, with no headers kwarg, so
+    # the fake here (which doesn't accept one) still works.
+    monkeypatch.setattr(http_mod.httpx, 'get', lambda url, timeout=5.0: _FakeResponse(200))
+    result = http_mod.http_check('example.com')
+    assert result['status'] == 'ok'
 
 
 # ── Port ─────────────────────────────────────────────────────────────────

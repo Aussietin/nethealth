@@ -119,6 +119,22 @@ def test_desktop_swallows_any_subprocess_error(monkeypatch):
     alerts_mod._desktop("title", "body")  # must not raise
 
 
+def test_desktop_uses_osascript_on_macos(monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, timeout=None, capture_output=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(alerts_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(alerts_mod.subprocess, "run", _fake_run)
+    alerts_mod._desktop("nethealth - DNS FAIL", "example.com: timeout")
+
+    assert captured["cmd"][0] == "osascript"
+    assert "example.com: timeout" in captured["cmd"][2]
+    assert "nethealth - DNS FAIL" in captured["cmd"][2]
+
+
 # ── _webhook() ───────────────────────────────────────────────────────────
 
 def test_webhook_noop_on_empty_url():
@@ -153,3 +169,101 @@ def test_webhook_swallows_request_errors(monkeypatch):
 
     monkeypatch.setattr(httpx, "post", _raise)
     alerts_mod._webhook("https://hooks.example/x", {"target": "x"})  # must not raise
+
+
+# ── fire() dispatch to Slack / Teams ────────────────────────────────────
+
+def test_fire_calls_slack_and_teams_when_configured(monkeypatch):
+    calls = []
+    monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: None)
+    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: None)
+    monkeypatch.setattr(alerts_mod, "_slack", lambda *a: calls.append(("slack", a)))
+    monkeypatch.setattr(alerts_mod, "_teams", lambda *a: calls.append(("teams", a)))
+
+    cfg = _cfg(slack_webhook_url="https://hooks.slack.example/x",
+               teams_webhook_url="https://outlook.office.com/webhook/x")
+    alerts_mod.fire("example.com", "dns", "timeout", cfg)
+    assert {c[0] for c in calls} == {"slack", "teams"}
+
+
+def test_fire_skips_slack_and_teams_when_not_configured(monkeypatch):
+    calls = []
+    monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: None)
+    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: None)
+    monkeypatch.setattr(alerts_mod, "_slack", lambda *a: calls.append("slack"))
+    monkeypatch.setattr(alerts_mod, "_teams", lambda *a: calls.append("teams"))
+
+    alerts_mod.fire("example.com", "dns", "timeout", _cfg())
+    assert calls == []
+
+
+# ── _slack() / _teams() ──────────────────────────────────────────────────
+
+def test_slack_noop_on_empty_url():
+    alerts_mod._slack("", {"target": "x", "check": "dns", "status": "fail",
+                            "error": "timeout", "timestamp": "now"})
+
+
+def test_slack_posts_formatted_message(monkeypatch):
+    import httpx
+    captured = {}
+
+    def _fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    payload = {"target": "example.com", "check": "dns", "status": "fail",
+               "error": "timeout", "timestamp": "2026-09-05T10:00:00"}
+    alerts_mod._slack("https://hooks.slack.example/x", payload)
+
+    assert captured["url"] == "https://hooks.slack.example/x"
+    assert "example.com" in captured["json"]["text"]
+    assert "DNS" in captured["json"]["text"]
+
+
+def test_slack_swallows_request_errors(monkeypatch):
+    import httpx
+
+    def _raise(url, json=None, timeout=None):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "post", _raise)
+    payload = {"target": "x", "check": "dns", "status": "fail",
+               "error": "e", "timestamp": "now"}
+    alerts_mod._slack("https://hooks.slack.example/x", payload)  # must not raise
+
+
+def test_teams_noop_on_empty_url():
+    alerts_mod._teams("", {"target": "x", "check": "dns", "status": "fail",
+                            "error": "timeout", "timestamp": "now"})
+
+
+def test_teams_posts_message_card(monkeypatch):
+    import httpx
+    captured = {}
+
+    def _fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    payload = {"target": "example.com", "check": "dns", "status": "fail",
+               "error": "timeout", "timestamp": "2026-09-05T10:00:00"}
+    alerts_mod._teams("https://outlook.office.com/webhook/x", payload)
+
+    assert captured["url"] == "https://outlook.office.com/webhook/x"
+    assert captured["json"]["@type"] == "MessageCard"
+    assert captured["json"]["summary"].startswith("nethealth")
+
+
+def test_teams_swallows_request_errors(monkeypatch):
+    import httpx
+
+    def _raise(url, json=None, timeout=None):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "post", _raise)
+    payload = {"target": "x", "check": "dns", "status": "fail",
+               "error": "e", "timestamp": "now"}
+    alerts_mod._teams("https://outlook.office.com/webhook/x", payload)  # must not raise

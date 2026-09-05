@@ -66,6 +66,40 @@ def test_generate_report_aggregates_per_target(tmp_path, monkeypatch):
     assert ping_stats['max_ms'] == 30.0
 
 
+def test_generate_report_sparkline_reflects_pass_fail_order(tmp_path, monkeypatch):
+    history_path = tmp_path / 'history.json'
+    # oldest -> newest: ok, fail, ok
+    entries = [
+        {'timestamp': '2026-08-01T10:00:00', 'target': 'example.com',
+         'results': {'dns': {'status': 'ok', 'latency': 1.0}}},
+        {'timestamp': '2026-08-01T10:01:00', 'target': 'example.com',
+         'results': {'dns': {'status': 'fail', 'error': 'timeout'}}},
+        {'timestamp': '2026-08-01T10:02:00', 'target': 'example.com',
+         'results': {'dns': {'status': 'ok', 'latency': 1.0}}},
+    ]
+    _write_history(history_path, entries)
+    monkeypatch.setattr(report_mod, 'HISTORY_PATH', history_path)
+
+    data = report_mod.generate_report()
+    spark = data['per_target']['example.com']['dns']['sparkline']
+    assert spark == '█▁█'  # ok, fail, ok, oldest -> newest
+
+
+def test_generate_report_sparkline_caps_at_recent_samples(tmp_path, monkeypatch):
+    history_path = tmp_path / 'history.json'
+    entries = [
+        {'timestamp': f'2026-08-01T10:{i:02d}:00', 'target': 'example.com',
+         'results': {'dns': {'status': 'ok', 'latency': 1.0}}}
+        for i in range(30)
+    ]
+    _write_history(history_path, entries)
+    monkeypatch.setattr(report_mod, 'HISTORY_PATH', history_path)
+
+    data = report_mod.generate_report()
+    spark = data['per_target']['example.com']['dns']['sparkline']
+    assert len(spark) == report_mod._SPARK_SAMPLES
+
+
 def test_generate_report_filters_by_target(tmp_path, monkeypatch):
     history_path = tmp_path / 'history.json'
     entries = [

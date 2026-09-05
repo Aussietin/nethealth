@@ -30,11 +30,15 @@ refresh_interval = 30
 [alerts]
 # Set to false to silence all alerts.
 enabled = true
-# Fire a desktop notification via notify-send (Linux).
+# Fire a desktop notification via notify-send (Linux) or osascript (macOS).
 desktop = true
-# Optional webhook URL — leave empty to disable.
+# Optional generic webhook URL — leave empty to disable.
 # nethealth will POST JSON: {target, check, status, error, timestamp}
 webhook_url = ""
+# Optional Slack Incoming Webhook URL.
+slack_webhook_url = ""
+# Optional Microsoft Teams Incoming Webhook URL.
+teams_webhook_url = ""
 
 [speed]
 # Default download size in MB for nethealth speed.
@@ -45,7 +49,13 @@ size_mb = 10
 # exists but fails to parse (missing/malformed handled the same way).
 _HARD_DEFAULTS = {
     "defaults": {"targets": ["google.com", "1.1.1.1"], "refresh_interval": 30},
-    "alerts":   {"enabled": True, "desktop": True, "webhook_url": ""},
+    "alerts":   {
+        "enabled": True,
+        "desktop": True,
+        "webhook_url": "",
+        "slack_webhook_url": "",
+        "teams_webhook_url": "",
+    },
     "speed":    {"size_mb": 10},
 }
 
@@ -105,9 +115,11 @@ def save(data: dict) -> None:
     targets = defaults_.get("targets") or ["google.com", "1.1.1.1"]
     targets_toml = "[" + ", ".join(f'"{t}"' for t in targets) + "]"
     refresh_interval = defaults_.get("refresh_interval", 30)
-    enabled  = "true" if alerts_.get("enabled", True) else "false"
-    desktop  = "true" if alerts_.get("desktop", True) else "false"
-    webhook_url = alerts_.get("webhook_url", "") or ""
+    enabled          = "true" if alerts_.get("enabled", True) else "false"
+    desktop          = "true" if alerts_.get("desktop", True) else "false"
+    webhook_url       = alerts_.get("webhook_url", "") or ""
+    slack_webhook_url = alerts_.get("slack_webhook_url", "") or ""
+    teams_webhook_url = alerts_.get("teams_webhook_url", "") or ""
     size_mb = speed_.get("size_mb", 10)
 
     content = f"""\
@@ -120,11 +132,15 @@ refresh_interval = {refresh_interval}
 [alerts]
 # Set to false to silence all alerts.
 enabled = {enabled}
-# Fire a desktop notification via notify-send (Linux).
+# Fire a desktop notification via notify-send (Linux) or osascript (macOS).
 desktop = {desktop}
-# Optional webhook URL — leave empty to disable.
+# Optional generic webhook URL — leave empty to disable.
 # nethealth will POST JSON: {{target, check, status, error, timestamp}}
 webhook_url = "{webhook_url}"
+# Optional Slack Incoming Webhook URL.
+slack_webhook_url = "{slack_webhook_url}"
+# Optional Microsoft Teams Incoming Webhook URL.
+teams_webhook_url = "{teams_webhook_url}"
 
 [speed]
 # Default download size in MB for nethealth speed.
@@ -132,3 +148,4 @@ size_mb = {size_mb}
 """
     CONFIG_DIR.mkdir(exist_ok=True)
     CONFIG_PATH.write_text(content)
+

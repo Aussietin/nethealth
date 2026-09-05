@@ -98,12 +98,24 @@ def test_check_command_skip_traceroute(monkeypatch):
 
 
 def test_check_command_json_output(monkeypatch):
+    # Schema as of the multi-target `check` rework: {"timestamp":...,
+    # "targets": {name: {check: result, ...}}} rather than a single
+    # top-level "target"/"results" pair, so N targets can share one
+    # JSON document.
     _patch_checks(monkeypatch, _OK_RESULTS, traceroute={"status": "ok", "hops": []})
     result = CliRunner().invoke(cli, ["check", "example.com", "--json"])
     assert result.exit_code == 0
     data = json.loads(result.output)
-    assert data["target"] == "example.com"
-    assert data["results"]["dns"]["status"] == "ok"
+    assert data["targets"]["example.com"]["dns"]["status"] == "ok"
+
+
+def test_check_command_json_output_multi_target(monkeypatch):
+    _patch_checks(monkeypatch, _OK_RESULTS, traceroute={"status": "ok", "hops": []})
+    result = CliRunner().invoke(cli, ["check", "example.com", "1.1.1.1", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert set(data["targets"].keys()) == {"example.com", "1.1.1.1"}
+    assert data["targets"]["1.1.1.1"]["http"]["status"] == "ok"
 
 
 def test_check_command_save_json(monkeypatch, tmp_path):
@@ -115,6 +127,14 @@ def test_check_command_save_json(monkeypatch, tmp_path):
     assert history_path.exists()
     data = json.loads(history_path.read_text())
     assert data[0]["target"] == "example.com"
+
+
+def test_check_command_multi_target_table_output(monkeypatch):
+    _patch_checks(monkeypatch, _OK_RESULTS, traceroute={"status": "ok", "hops": []})
+    result = CliRunner().invoke(cli, ["check", "example.com", "1.1.1.1", "--skip-traceroute"])
+    assert result.exit_code == 0
+    # Both targets' tables/verdicts should appear, each independently 4/4.
+    assert result.output.count("4/4") == 2
 
 
 def test_check_command_save_csv(monkeypatch, tmp_path):

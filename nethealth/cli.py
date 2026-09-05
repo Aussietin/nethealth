@@ -1,8 +1,11 @@
 import click
 import json
 import csv
+import os
 import time
 import signal
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from rich.console import Console
@@ -22,13 +25,20 @@ from nethealth.checks.packet_sniffer import packet_sniffer_check
 console = Console()
 
 
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
 def _fmt_status(status: str) -> str:
     return "[green]✅  OK[/green]" if status == "ok" else "[red]❌  FAIL[/red]"
 
 
 def _fmt_dns(result: dict) -> str:
     if result["status"] == "ok":
-        return f"{result['latency']:.1f}ms"
+        parts = [f"{result['latency']:.1f}ms"]
+        if result.get("resolver"):
+            parts.append(f"via {result['resolver']}")
+        return "  ".join(parts)
     return result.get("error", "failed")
 
 
@@ -41,7 +51,9 @@ def _fmt_ping(result: dict) -> str:
 
 def _fmt_http(result: dict) -> str:
     if result["status"] == "ok":
-        return f"HTTP {result.get('code', '?')}  ·  {result.get('latency', 0):.0f}ms"
+        method = result.get("method", "GET")
+        method_tag = f"[{method}] " if method != "GET" else ""
+        return f"{method_tag}HTTP {result.get('code', '?')}  ·  {result.get('latency', 0):.0f}ms"
     return result.get("error", "failed")
 
 
@@ -95,14 +107,26 @@ def _save_history(target: str, results: dict, fmt: str) -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# CLI root
+# ---------------------------------------------------------------------------
+
 @click.group(invoke_without_command=True)
+@click.option("--log", "log_file", default=None, metavar="FILE",
+              help="Write a rotating log to FILE (e.g. ~/.nethealth/nethealth.log).")
 @click.pass_context
-def cli(ctx):
+def cli(ctx, log_file):
     """Network health diagnostics.
 
     Run `nethealth` on its own for a plain-language check of whether your
     internet is working. Use the subcommands below for detail.
     """
+    ctx.ensure_object(dict)
+    if log_file:
+        from nethealth.logger import setup_file_log
+        setup_file_log(log_file)
+        ctx.obj["log_file"] = log_file
+
     if ctx.invoked_subcommand is None:
         ctx.invoke(status)
 
@@ -122,29 +146,35 @@ def help_command(ctx, command):
         click.echo(cli.get_help(ctx))
 
 
-@cli.command()
-@click.argument("target")
-@click.option("--skip-traceroute", is_flag=True, help="Skip the (potentially slow) traceroute check")
-@click.option("--json", "output_json", is_flag=True, help="Output raw JSON (script-friendly)")
-@click.option("--save", type=click.Choice(["json", "csv"]), default=None, help="Append results to ~/.nethealth/history.{json,csv}")
-def check(target, skip_traceroute, output_json, save):
-    """Run full network health check suite"""
-    results = {
-        "dns":  dns_check(target),
-        "ping": ping_check(target),
-        "http": http_check(target),
-        "port": port_check(target),
+# ---------------------------------------------------------------------------
+# check — parallel, multi-target
+# ---------------------------------------------------------------------------
+
+def _run_checks_for_target(target: str, skip_traceroute: bool) -> dict:
+    """Run all checks for a single target concurrently; return results dict."""
+    tasks = {
+        "dns":  lambda: dns_check(target),
+        "ping": lambda: ping_check(target),
+        "http": lambda: http_check(target),
+        "port": lambda: port_check(target),
     }
     if not skip_traceroute:
-        results["traceroute"] = traceroute_check(target, max_hops=15)
+        tasks["traceroute"] = lambda: traceroute_check(target, max_hops=15)
 
-    if output_json:
-        click.echo(json.dumps(
-            {"target": target, "timestamp": datetime.now().isoformat(), "results": results},
-            indent=2,
-        ))
-        return
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {pool.submit(fn): name for name, fn in tasks.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:
+                results[name] = {"name": name.upper(), "status": "fail", "error": str(exc)}
+    return results
 
+
+def _print_check_table(target: str, results: dict, skip_traceroute: bool) -> int:
+    """Render the results table for one target; return number of passed checks."""
     table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold cyan", pad_edge=False)
     table.add_column("Check",  style="bold", width=14)
     table.add_column("Status", width=12)
@@ -156,7 +186,7 @@ def check(target, skip_traceroute, output_json, save):
         ("HTTP", results["http"], _fmt_http),
         ("Port", results["port"], _fmt_port),
     ]
-    if not skip_traceroute:
+    if not skip_traceroute and "traceroute" in results:
         tr = results["traceroute"]
         hop_count = len(tr.get("hops", []))
         check_rows.append(("Traceroute", tr, lambda r: f"{hop_count} hops" if r["status"] == "ok" else r.get("message", "failed")))
@@ -182,11 +212,77 @@ def check(target, skip_traceroute, output_json, save):
     )
     vcolor = {"ok": "green", "warn": "yellow", "down": "red"}[verdict.severity]
     console.print(f"  [{vcolor}]{verdict.headline}[/{vcolor}]\n")
+    return passed
 
-    if save:
-        path = _save_history(target, results, save)
-        console.print(f"  [dim]Saved → {path}[/dim]\n")
 
+@cli.command()
+@click.argument("targets", nargs=-1, required=True)
+@click.option("--skip-traceroute", is_flag=True, help="Skip the (potentially slow) traceroute check")
+@click.option("--json", "output_json", is_flag=True, help="Output raw JSON (script-friendly)")
+@click.option("--save", type=click.Choice(["json", "csv"]), default=None, help="Append results to ~/.nethealth/history.{json,csv}")
+def check(targets, skip_traceroute, output_json, save):
+    """Run full network health check suite against one or more TARGETs.
+
+    All checks (DNS, ping, HTTP, port, traceroute) run in parallel per target.
+    Multiple targets are also checked concurrently.
+
+    \b
+    Examples:
+      nethealth check google.com
+      nethealth check google.com 1.1.1.1 mysite.example.com
+      nethealth check google.com --json
+      nethealth check google.com --save json
+    """
+    from nethealth.logger import get_logger
+    log = get_logger(__name__)
+
+    all_results: dict[str, dict] = {}
+
+    # Run checks for each target; parallelise across targets too.
+    with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
+        futures = {
+            pool.submit(_run_checks_for_target, t, skip_traceroute): t
+            for t in targets
+        }
+        for future in as_completed(futures):
+            tgt = futures[future]
+            try:
+                all_results[tgt] = future.result()
+            except Exception as exc:
+                all_results[tgt] = {
+                    "dns":  {"name": "DNS",  "status": "fail", "error": str(exc)},
+                    "ping": {"name": "Ping", "status": "fail", "error": str(exc)},
+                    "http": {"name": "HTTP", "status": "fail", "error": str(exc)},
+                    "port": {"name": "Port", "status": "fail", "error": str(exc)},
+                }
+
+    if output_json:
+        click.echo(json.dumps(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "targets": {t: all_results[t] for t in targets},
+            },
+            indent=2,
+        ))
+        return
+
+    # Print tables in the same order the user specified targets.
+    for tgt in targets:
+        results = all_results[tgt]
+        _print_check_table(tgt, results, skip_traceroute)
+        log.info("check completed target=%s dns=%s ping=%s http=%s",
+                 tgt,
+                 results["dns"]["status"],
+                 results["ping"]["status"],
+                 results["http"]["status"])
+        if save:
+            path = _save_history(tgt, results, save)
+            console.print(f"  [dim]Saved → {path}[/dim]\n")
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
 
 @cli.command()
 @click.argument("target", required=False)
@@ -243,13 +339,27 @@ def status(target, output_json):
     console.print(f"  [dim]Full technical detail:  nethealth check {target}[/dim]\n")
 
 
+# ---------------------------------------------------------------------------
+# Individual check subcommands
+# ---------------------------------------------------------------------------
+
 @cli.command()
 @click.argument("target")
-def dns(target):
-    """DNS resolution check"""
-    result = dns_check(target)
+@click.option("--resolver", default=None, metavar="IP",
+              help="DNS server IP to query instead of the system resolver (e.g. 8.8.8.8).")
+def dns(target, resolver):
+    """DNS resolution check.
+
+    \b
+    Examples:
+      nethealth dns google.com
+      nethealth dns google.com --resolver 8.8.8.8
+      nethealth dns google.com --resolver 1.1.1.1
+    """
+    result = dns_check(target, resolver_addr=resolver)
     icon = "✅" if result["status"] == "ok" else "❌"
-    console.print(f"{icon} [bold]DNS[/bold]  {target}  —  {_fmt_dns(result)}")
+    resolver_tag = f"  [dim](via {resolver})[/dim]" if resolver else ""
+    console.print(f"{icon} [bold]DNS[/bold]  {target}  —  {_fmt_dns(result)}{resolver_tag}")
 
 
 @cli.command()
@@ -263,9 +373,30 @@ def ping(target):
 
 @cli.command()
 @click.argument("target")
-def http(target):
-    """HTTP/HTTPS connectivity check"""
-    result = http_check(target)
+@click.option("--head", "use_head", is_flag=True,
+              help="Use HEAD instead of GET (faster for large resources).")
+@click.option("--header", "extra_headers", multiple=True, metavar="KEY:VALUE",
+              help="Extra request header(s). Repeatable. Example: --header 'Authorization:Bearer TOKEN'")
+def http(target, use_head, extra_headers):
+    """HTTP/HTTPS connectivity check.
+
+    \b
+    Examples:
+      nethealth http example.com
+      nethealth http example.com --head
+      nethealth http api.example.com --header 'Authorization:Bearer mytoken'
+      nethealth http example.com --head --header 'X-Custom:value'
+    """
+    method = "HEAD" if use_head else "GET"
+    headers: dict = {}
+    for hdr in extra_headers:
+        if ":" in hdr:
+            k, _, v = hdr.partition(":")
+            headers[k.strip()] = v.strip()
+        else:
+            console.print(f"  [yellow]Warning: ignoring malformed header {hdr!r} (expected KEY:VALUE)[/yellow]")
+
+    result = http_check(target, method=method, headers=headers or None)
     icon = "✅" if result["status"] == "ok" else "❌"
     console.print(f"{icon} [bold]HTTP[/bold]  {target}  —  {_fmt_http(result)}")
 
@@ -337,6 +468,10 @@ def sniffer(interface, count, timeout):
             console.print("  [dim]Non-IPv4 payload[/dim]")
         console.print()
 
+
+# ---------------------------------------------------------------------------
+# monitor group
+# ---------------------------------------------------------------------------
 
 @cli.group()
 def monitor():
@@ -454,6 +589,10 @@ def monitor_http_cmd(targets, interval):
                       f"({s['ok']}/{s['total']} checks){down_str}")
     console.print()
 
+
+# ---------------------------------------------------------------------------
+# tui / speed / wifi / gateway / ip / ssl
+# ---------------------------------------------------------------------------
 
 @cli.command()
 @click.argument("targets", nargs=-1, metavar="[TARGET]...")
@@ -607,6 +746,10 @@ def ssl(host, port, output_json):
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _fmt_duration(seconds: int) -> str:
     if seconds < 60:
         return f"{seconds}s"
@@ -614,6 +757,10 @@ def _fmt_duration(seconds: int) -> str:
         return f"{seconds // 60}m {seconds % 60}s"
     return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
 
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
 
 @cli.command()
 @click.option("--target", default=None, help="Filter by target hostname/IP")
@@ -640,11 +787,12 @@ def report(target, last, output_json):
     for tgt, checks in data["per_target"].items():
         console.print(f"[bold]{tgt}[/bold]")
         table = Table(box=box.SIMPLE, show_header=True, header_style="dim", pad_edge=False)
-        table.add_column("Check",   width=8)
-        table.add_column("Pass%",   width=7)
-        table.add_column("Avg ms",  width=9)
-        table.add_column("Min ms",  width=9)
-        table.add_column("Max ms",  width=9)
+        table.add_column("Check",     width=8)
+        table.add_column("Pass%",     width=7)
+        table.add_column("Trend",     width=22)   # sparkline column
+        table.add_column("Avg ms",    width=9)
+        table.add_column("Min ms",    width=9)
+        table.add_column("Max ms",    width=9)
 
         for check_name, stats in checks.items():
             pct = stats["pass_pct"]
@@ -652,10 +800,100 @@ def report(target, last, output_json):
             avg = str(stats.get("avg_ms") or stats.get("avg_latency_ms") or "—")
             mn  = str(stats.get("min_ms") or stats.get("min_latency_ms") or "—")
             mx  = str(stats.get("max_ms") or stats.get("max_latency_ms") or "—")
+            spark = stats.get("sparkline", "")
+            # Colour the sparkline: green if all ok, yellow if mixed, red if heavy fails
+            ok_count = spark.count("█")
+            spark_color = "green" if ok_count == len(spark) else ("yellow" if ok_count > len(spark) // 2 else "red")
             table.add_row(
                 check_name.upper(),
                 f"[{pct_color}]{pct}%[/{pct_color}]",
+                f"[{spark_color}]{spark}[/{spark_color}]",
                 avg, mn, mx,
             )
         console.print(table)
         console.print()
+
+
+# ---------------------------------------------------------------------------
+# config subcommand group
+# ---------------------------------------------------------------------------
+
+@cli.group("config")
+def config_cmd():
+    """Manage nethealth configuration (~/.nethealth/config.toml)."""
+    pass
+
+
+@config_cmd.command("show")
+def config_show():
+    """Pretty-print the current configuration."""
+    from nethealth import config as _cfg
+
+    cfg, err = _cfg.load_with_status()
+    if err:
+        console.print(f"[yellow]⚠  Config file has errors (using defaults): {err}[/yellow]\n")
+
+    path = _cfg.CONFIG_PATH
+    console.print(f"\n[bold cyan]nethealth config[/bold cyan]  [dim]{path}[/dim]\n")
+
+    # defaults section
+    d = cfg.get("defaults", {})
+    console.print("[bold]\\[defaults][/bold]")
+    console.print(f"  targets          = {d.get('targets', [])}")
+    console.print(f"  refresh_interval = {d.get('refresh_interval', 30)}s\n")
+
+    # alerts section
+    a = cfg.get("alerts", {})
+    console.print("[bold]\\[alerts][/bold]")
+    console.print(f"  enabled           = {a.get('enabled', True)}")
+    console.print(f"  desktop           = {a.get('desktop', True)}")
+    console.print(f"  webhook_url       = {a.get('webhook_url', '') or '(not set)'}")
+    console.print(f"  slack_webhook_url = {a.get('slack_webhook_url', '') or '(not set)'}")
+    console.print(f"  teams_webhook_url = {a.get('teams_webhook_url', '') or '(not set)'}\n")
+
+    # speed section
+    s = cfg.get("speed", {})
+    console.print("[bold]\\[speed][/bold]")
+    console.print(f"  size_mb = {s.get('size_mb', 10)}\n")
+
+
+@config_cmd.command("edit")
+def config_edit():
+    """Open the config file in your default editor ($EDITOR / notepad)."""
+    from nethealth import config as _cfg
+
+    _cfg.CONFIG_DIR.mkdir(exist_ok=True)
+    if not _cfg.CONFIG_PATH.exists():
+        _cfg.load()  # creates the file with defaults
+
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if not editor:
+        # Sensible cross-platform fallback
+        editor = "notepad" if os.name == "nt" else "nano"
+
+    console.print(f"  [dim]Opening {_cfg.CONFIG_PATH} with {editor}…[/dim]")
+    try:
+        subprocess.run([editor, str(_cfg.CONFIG_PATH)])
+    except FileNotFoundError:
+        console.print(
+            f"  [red]Could not launch {editor!r}.[/red] "
+            f"Set the EDITOR environment variable or edit the file directly:\n"
+            f"  {_cfg.CONFIG_PATH}"
+        )
+
+
+@config_cmd.command("reset")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
+def config_reset(yes):
+    """Reset config to factory defaults, overwriting the existing file."""
+    from nethealth import config as _cfg
+
+    if not yes:
+        click.confirm(
+            f"This will overwrite {_cfg.CONFIG_PATH} with default settings. Continue?",
+            abort=True,
+        )
+
+    _cfg.CONFIG_DIR.mkdir(exist_ok=True)
+    _cfg.CONFIG_PATH.write_text(_cfg._DEFAULT)
+    console.print(f"  [green]✅ Config reset to defaults → {_cfg.CONFIG_PATH}[/green]\n")

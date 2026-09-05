@@ -77,18 +77,25 @@ Live status table (DNS / Ping / HTTP / Port / SSL), ping sparklines with latency
 
 ```bash
 nethealth check google.com
-nethealth check google.com --json          # raw JSON
+nethealth check google.com 1.1.1.1 cloudflare.com   # multiple targets, checked concurrently
+nethealth check google.com --json          # raw JSON: {"timestamp":..., "targets": {name: {check: result}}}
 nethealth check google.com --save json     # append to ~/.nethealth/history.json
 nethealth check google.com --save csv      # append to ~/.nethealth/history.csv
 nethealth check google.com --skip-traceroute
 ```
 
+All checks for a target run in parallel, and multiple targets run concurrently too (up to 8
+at once) -- `nethealth check` against a handful of targets doesn't take N times as long.
+
 ### Individual checks
 
 ```bash
 nethealth dns 1.1.1.1
+nethealth dns google.com --resolver 8.8.8.8    # query a specific DNS server instead of the system resolver
 nethealth ping 1.1.1.1
 nethealth http google.com          # tries HTTPS first, falls back to plain HTTP if the connection itself fails (e.g. a LAN device with no TLS)
+nethealth http google.com --head   # HEAD instead of GET -- faster for large resources
+nethealth http api.example.com --header 'Authorization:Bearer TOKEN'   # repeatable
 nethealth port google.com --ports 80,443,8080
 nethealth traceroute google.com --max-hops 20
 nethealth gateway                  # ping the default gateway -- first-hop reachability before DNS/HTTP even matter
@@ -135,7 +142,8 @@ Reads from `~/.nethealth/history.json`, which fills itself two ways:
 - **Manually** — `nethealth check <target> --save json` appends a snapshot on demand.
 
 The Report tab in the TUI (key `3`) shows the same aggregation live and refreshes itself
-while it's the active tab.
+while it's the active tab. Each check row includes a colour-coded sparkline (last 20 samples,
+oldest → newest) so a recent run of failures is visible at a glance, not just the pass %.
 
 ### Packet sniffer
 
@@ -145,15 +153,51 @@ sudo nethealth sniffer --interface any --count 8
 
 Captures raw Ethernet frames, parses IPv4/TCP/UDP/ICMP headers. Requires root.
 
+### Config
+
+```bash
+nethealth config show     # pretty-print the current ~/.nethealth/config.toml
+nethealth config edit     # open it in $EDITOR / $VISUAL (falls back to notepad/nano)
+nethealth config reset    # overwrite with factory defaults (--yes to skip the confirmation)
+```
+
+`~/.nethealth/config.toml` fields:
+
+```toml
+[defaults]
+targets = ["google.com", "1.1.1.1"]   # TUI default targets
+refresh_interval = 30                  # seconds between TUI refresh cycles
+
+[alerts]
+enabled = true             # set false to silence all alerts
+desktop = true              # notify-send (Linux) / osascript (macOS)
+webhook_url = ""            # generic POST: {target, check, status, error, timestamp}
+slack_webhook_url = ""      # Slack Incoming Webhook
+teams_webhook_url = ""      # Microsoft Teams Incoming Webhook
+
+[speed]
+size_mb = 10                # default download size for `nethealth speed`
+```
+
+### Logging
+
+```bash
+nethealth --log ~/.nethealth/nethealth.log check google.com
+```
+
+Off by default -- with no `--log`, nothing is written. Rotating file handler, 5 MB per file,
+3 backups kept.
+
 ---
 
 ## Testing
 
 ```bash
 pip install -e '.[dev]'   # pytest + pytest-asyncio, dev-only extras
-pytest                     # ~40 tests: config/report/wifi-parsing unit tests,
+pytest                     # 170+ tests: config/report/wifi-parsing unit tests,
                             # mocked check-function tests, headless Textual
                             # pilot tests (app.run_test() + Pilot) for the TUI
+                            # (these dominate the run time, ~2-3 min total)
 ```
 
 Nothing in the suite touches your real `~/.nethealth/` — TUI and config tests
