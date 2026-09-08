@@ -12,5 +12,4 @@ nethealth — network diagnostic TUI (traceroute, packet sniffer, gateway/IP che
 Austin's global rules live in `~/.claude/CLAUDE.md` + `CLAUDE-shared.md` (Claude Code) and
 `~/.codex/AGENTS.md` (Codex) — same contract, both agents. Load-bearing: simplest viable
 solution first (no new scripts/infra unless asked), confirm the path before editing, todos are
-per-project (never a global TASKS.md), commit/push only when asked and branch off the default
-first, session-end `/document` capture to the vault if the work produced a decision/fix/learning.
+per-project (never a global TASKS.md), the git workflow in that contract (small solo repos: commit straight to the default branch; session end syncs every touched repo — commit, push, merge/prune — without asking), session-end `/document` capture to the vault if the work produced a decision/fix/learning.
