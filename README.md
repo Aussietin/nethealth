@@ -107,6 +107,7 @@ nethealth ip                       # current public/external IP (useful for noti
 ```bash
 nethealth security server.example              # defensive baseline of common access/database ports
 nethealth security server.example --ports 22,443,3389
+nethealth security server.example --extended --learn  # wider read-only audit plus an explanation of every layer
 nethealth security server.example --json       # structured output for scripts
 ```
 
@@ -116,6 +117,12 @@ certificate expiry and standard HTTPS response headers when port 443 is open.
 It does not authenticate, attempt exploitation, or change the target. An open
 port is a prompt to confirm its intended access and firewall policy, not proof
 of a vulnerability.
+
+`--learn` turns the command into a compact field lesson: it explains the difference
+between exposed services, TLS trust, and browser-security headers, and every finding
+now includes both **why it matters** and a practical **next step**. `--extended`
+adds a small set of common mail, monitoring, development, and alternate web ports;
+it remains a TCP reachability check, not a vulnerability scan.
 
 ### Speed test
 

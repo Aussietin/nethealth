@@ -440,25 +440,29 @@ def port(target, ports):
 @cli.command("security")
 @click.argument("target")
 @click.option("--ports", default=None, help="Comma-separated ports to audit (defaults to a defensive baseline).")
+@click.option("--extended", is_flag=True, help="Include common mail, web, monitoring, and development-service ports.")
 @click.option("--timeout", default=2, show_default=True, type=click.IntRange(1, 30), help="Per-port connection timeout in seconds.")
+@click.option("--learn", is_flag=True, help="Explain what the audit checks and how to interpret it.")
 @click.option("--json", "output_json", is_flag=True, help="Output raw JSON (script-friendly).")
-def security(target, ports, timeout, output_json):
+def security(target, ports, extended, timeout, learn, output_json):
     """Read-only exposure audit for a host you are authorised to assess.
 
     Checks a small set of common remote-access and database ports, then
     inspects TLS expiry and HTTPS response headers when port 443 is open.
     It does not exploit services, authenticate, or change the target.
     """
-    from nethealth.checks.security import DEFAULT_PORTS, security_audit
+    from nethealth.checks.security import DEFAULT_PORTS, EXTENDED_PORTS, LEARNING_GUIDE, security_audit
 
     try:
-        port_list = [int(value.strip()) for value in ports.split(",")] if ports else DEFAULT_PORTS
+        port_list = [int(value.strip()) for value in ports.split(",")] if ports else (EXTENDED_PORTS if extended else DEFAULT_PORTS)
     except ValueError:
         raise click.BadParameter("ports must be comma-separated integers", param_hint="--ports")
     if any(port < 1 or port > 65535 for port in port_list):
         raise click.BadParameter("ports must be between 1 and 65535", param_hint="--ports")
 
     result = security_audit(target, ports=port_list, timeout=timeout)
+    if learn:
+        result["guide"] = LEARNING_GUIDE
     if output_json:
         click.echo(json.dumps(result, indent=2))
         return
@@ -470,14 +474,22 @@ def security(target, ports, timeout, output_json):
     console.print()
     console.print(Panel(
         f"[bold]{icon}  Security exposure audit: {target}[/bold]\n"
-        f"[dim]Reachable checked ports: {', '.join(open_ports) or 'none'}[/dim]",
+        f"[dim]Reachable checked ports: {', '.join(open_ports) or 'none'} · "
+        f"{result['summary']['warn']} review item(s), {result['summary']['info']} note(s)[/dim]",
         border_style=color, expand=False,
     ))
+    if learn:
+        guide = "\n\n".join(
+            f"[bold]{item['topic']}[/bold]\n{item['meaning']}\n[cyan]Ask:[/cyan] {item['question']}"
+            for item in LEARNING_GUIDE
+        )
+        console.print(Panel(guide, title="How to read this audit", border_style="cyan", expand=False))
     if findings:
         for finding in findings:
             style = "yellow" if finding["severity"] == "warn" else "dim"
             console.print(f"  [{style}]• {finding['title']}[/{style}]")
-            console.print(f"    [dim]{finding['detail']}[/dim]")
+            console.print(f"    [dim]Why:[/dim] {finding['why']}")
+            console.print(f"    [dim]Next step:[/dim] {finding['action']}")
     else:
         console.print("  [green]No issues found in this limited, read-only baseline.[/green]")
     console.print("  [dim]An open port is not proof of a vulnerability; review intended access and firewall rules.[/dim]\n")

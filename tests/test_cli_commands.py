@@ -79,13 +79,29 @@ def test_security_command_json(monkeypatch):
         security_mod, "security_audit",
         lambda target, ports, timeout: {
             "name": "Security", "target": target, "status": "ok", "ports": [],
-            "tls": None, "headers": None, "findings": [],
+            "tls": None, "headers": None, "findings": [], "summary": {"warn": 0, "info": 0},
         },
     )
     result = CliRunner().invoke(cli, ["security", "example.com", "--ports", "443", "--json"])
 
     assert result.exit_code == 0
     assert json.loads(result.output)["target"] == "example.com"
+
+
+def test_security_command_learn_includes_guide(monkeypatch):
+    import nethealth.checks.security as security_mod
+
+    monkeypatch.setattr(
+        security_mod, "security_audit",
+        lambda target, ports, timeout: {
+            "name": "Security", "target": target, "status": "ok", "ports": [],
+            "tls": None, "headers": None, "findings": [], "summary": {"warn": 0, "info": 0},
+        },
+    )
+    result = CliRunner().invoke(cli, ["security", "example.com", "--learn", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["guide"][0]["topic"] == "Reachable ports"
 
 
 def test_security_command_rejects_invalid_port():

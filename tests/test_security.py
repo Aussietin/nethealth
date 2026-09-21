@@ -25,6 +25,7 @@ def test_headers_accepts_csp_frame_ancestors(monkeypatch):
             "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
             "x-content-type-options": "nosniff",
             "referrer-policy": "strict-origin-when-cross-origin",
+            "permissions-policy": "geolocation=()",
         }
         url = "https://example.com/"
         status_code = 200
@@ -33,6 +34,21 @@ def test_headers_accepts_csp_frame_ancestors(monkeypatch):
     result = security_mod.http_security_headers_check("example.com")
 
     assert result["findings"] == []
+
+
+def test_headers_reports_http_downgrade_and_server_disclosure(monkeypatch):
+    class Response:
+        headers = {"server": "ExampleServer/1.0"}
+        url = "http://example.com/"
+        status_code = 503
+
+    monkeypatch.setattr(security_mod.httpx, "head", lambda *args, **kwargs: Response())
+    result = security_mod.http_security_headers_check("example.com")
+    titles = {finding["title"] for finding in result["findings"]}
+
+    assert "HTTPS request ended on unencrypted HTTP" in titles
+    assert "Server software is disclosed" in titles
+    assert "Server returned an error response" in titles
 
 
 def test_audit_flags_reachable_remote_services(monkeypatch):
@@ -54,7 +70,7 @@ def test_audit_flags_reachable_remote_services(monkeypatch):
 
 def test_audit_includes_tls_and_header_findings(monkeypatch):
     monkeypatch.setattr(security_mod, "port_check", lambda *args, **kwargs: {"results": [{"port": 443, "status": "open"}]})
-    monkeypatch.setattr(security_mod, "ssl_check", lambda *args, **kwargs: {"status": "ok", "days_left": 10})
+    monkeypatch.setattr(security_mod, "ssl_check", lambda *args, **kwargs: {"status": "ok", "days_left": 10, "tls_version": "TLSv1.3"})
     monkeypatch.setattr(
         security_mod, "http_security_headers_check",
         lambda *args, **kwargs: {"findings": [
@@ -67,3 +83,14 @@ def test_audit_includes_tls_and_header_findings(monkeypatch):
     assert {item["title"] for item in result["findings"]} == {
         "TLS certificate expires soon", "HSTS header is missing",
     }
+
+
+def test_audit_flags_legacy_tls(monkeypatch):
+    monkeypatch.setattr(security_mod, "port_check", lambda *args, **kwargs: {"results": [{"port": 443, "status": "open"}]})
+    monkeypatch.setattr(security_mod, "ssl_check", lambda *args, **kwargs: {"status": "ok", "days_left": 90, "tls_version": "TLSv1.1"})
+    monkeypatch.setattr(security_mod, "http_security_headers_check", lambda *args, **kwargs: {"findings": []})
+
+    result = security_mod.security_audit("host.example", ports=[443])
+
+    assert result["status"] == "warn"
+    assert result["findings"][0]["title"] == "Legacy TLS protocol negotiated"

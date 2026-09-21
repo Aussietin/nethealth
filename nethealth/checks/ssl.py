@@ -9,6 +9,8 @@ def ssl_check(host: str, port: int = 443, timeout: int = 10) -> dict:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                 cert = ssock.getpeercert()
+                tls_version = ssock.version()
+                cipher = ssock.cipher()
 
         expiry = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
         days_left = (expiry - datetime.now(timezone.utc)).days
@@ -27,6 +29,8 @@ def ssl_check(host: str, port: int = 443, timeout: int = 10) -> dict:
             "subject_cn": subject.get("commonName", host),
             "issuer_o": issuer.get("organizationName", "unknown"),
             "sans": sans[:5],
+            "tls_version": tls_version,
+            "cipher": cipher[0] if cipher else None,
         }
     except ssl.SSLCertVerificationError as e:
         return {"name": "SSL", "status": "fail", "host": host, "port": port, "error": f"Verification failed: {e}"}
