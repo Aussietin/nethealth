@@ -102,6 +102,21 @@ nethealth gateway                  # ping the default gateway -- first-hop reach
 nethealth ip                       # current public/external IP (useful for noticing an ISP IP change)
 ```
 
+### Security exposure audit
+
+```bash
+nethealth security server.example              # defensive baseline of common access/database ports
+nethealth security server.example --ports 22,443,3389
+nethealth security server.example --json       # structured output for scripts
+```
+
+Use this only for hosts you own or are authorised to assess. It is deliberately
+read-only: it checks a small set of common exposed services, then inspects TLS
+certificate expiry and standard HTTPS response headers when port 443 is open.
+It does not authenticate, attempt exploitation, or change the target. An open
+port is a prompt to confirm its intended access and firewall policy, not proof
+of a vulnerability.
+
 ### Speed test
 
 ```bash
@@ -211,7 +226,7 @@ run against an isolated tmp directory via the `isolated_config` fixture in
 ```
 nethealth/
 ├── nethealth/
-│   ├── checks/         # dns, ping, http, port, ssl, traceroute, speed, wifi, gateway, public_ip, ping_monitor, packet_sniffer
+│   ├── checks/         # dns, ping, http, port, ssl, security, traceroute, speed, wifi, gateway, public_ip, ping_monitor, packet_sniffer
 │   ├── cli.py          # Click entry point
 │   ├── tui.py          # Textual TUI
 │   ├── config.py       # ~/.nethealth/config.toml load/save

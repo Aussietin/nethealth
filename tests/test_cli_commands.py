@@ -70,3 +70,26 @@ def test_help_lists_new_commands():
     assert result.exit_code == 0
     assert "gateway" in result.output
     assert "ip" in result.output
+
+
+def test_security_command_json(monkeypatch):
+    import nethealth.checks.security as security_mod
+
+    monkeypatch.setattr(
+        security_mod, "security_audit",
+        lambda target, ports, timeout: {
+            "name": "Security", "target": target, "status": "ok", "ports": [],
+            "tls": None, "headers": None, "findings": [],
+        },
+    )
+    result = CliRunner().invoke(cli, ["security", "example.com", "--ports", "443", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["target"] == "example.com"
+
+
+def test_security_command_rejects_invalid_port():
+    result = CliRunner().invoke(cli, ["security", "example.com", "--ports", "70000"])
+
+    assert result.exit_code != 0
+    assert "between 1 and 65535" in result.output

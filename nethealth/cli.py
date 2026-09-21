@@ -437,6 +437,52 @@ def port(target, ports):
     console.print()
 
 
+@cli.command("security")
+@click.argument("target")
+@click.option("--ports", default=None, help="Comma-separated ports to audit (defaults to a defensive baseline).")
+@click.option("--timeout", default=2, show_default=True, type=click.IntRange(1, 30), help="Per-port connection timeout in seconds.")
+@click.option("--json", "output_json", is_flag=True, help="Output raw JSON (script-friendly).")
+def security(target, ports, timeout, output_json):
+    """Read-only exposure audit for a host you are authorised to assess.
+
+    Checks a small set of common remote-access and database ports, then
+    inspects TLS expiry and HTTPS response headers when port 443 is open.
+    It does not exploit services, authenticate, or change the target.
+    """
+    from nethealth.checks.security import DEFAULT_PORTS, security_audit
+
+    try:
+        port_list = [int(value.strip()) for value in ports.split(",")] if ports else DEFAULT_PORTS
+    except ValueError:
+        raise click.BadParameter("ports must be comma-separated integers", param_hint="--ports")
+    if any(port < 1 or port > 65535 for port in port_list):
+        raise click.BadParameter("ports must be between 1 and 65535", param_hint="--ports")
+
+    result = security_audit(target, ports=port_list, timeout=timeout)
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+
+    findings = result["findings"]
+    color = "yellow" if result["status"] == "warn" else "green"
+    icon = "⚠️" if result["status"] == "warn" else "✅"
+    open_ports = [str(item["port"]) for item in result["ports"] if item["status"] == "open"]
+    console.print()
+    console.print(Panel(
+        f"[bold]{icon}  Security exposure audit: {target}[/bold]\n"
+        f"[dim]Reachable checked ports: {', '.join(open_ports) or 'none'}[/dim]",
+        border_style=color, expand=False,
+    ))
+    if findings:
+        for finding in findings:
+            style = "yellow" if finding["severity"] == "warn" else "dim"
+            console.print(f"  [{style}]• {finding['title']}[/{style}]")
+            console.print(f"    [dim]{finding['detail']}[/dim]")
+    else:
+        console.print("  [green]No issues found in this limited, read-only baseline.[/green]")
+    console.print("  [dim]An open port is not proof of a vulnerability; review intended access and firewall rules.[/dim]\n")
+
+
 @cli.command()
 @click.option("--interface", default="any", show_default=True, help="Interface to sniff (Linux)")
 @click.option("--count",     default=6,     show_default=True, type=int, help="Number of packets to capture")
