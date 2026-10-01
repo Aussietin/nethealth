@@ -3,6 +3,7 @@ nethealth/tui.py — Textual TUI with Monitor / Log / Report tabs.
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime
@@ -29,15 +30,11 @@ from textual.widgets import (
     TabPane,
 )
 
-from nethealth import config as cfg_mod
 from nethealth import alerts as alerts_mod
-from nethealth.checks.dns import dns_check
+from nethealth import checks
+from nethealth import config as cfg_mod
 from nethealth.checks.gateway import gateway_check
-from nethealth.checks.http import http_check
-from nethealth.checks.ping import ping_check
-from nethealth.checks.port import port_check
 from nethealth.checks.speed import speed_check
-from nethealth.checks.ssl import ssl_check
 from nethealth.checks.traceroute import traceroute_check
 from nethealth.checks.wifi import wifi_check
 from nethealth import report as report_mod
@@ -63,16 +60,6 @@ _COL_UPDATED = "Updated"
 
 _CHECKS = [_COL_DNS, _COL_PING, _COL_HTTP, _COL_PORT, _COL_SSL]
 
-
-def _safe_check(fn, *args, **kwargs) -> dict:
-    """Run a check_* function, converting a genuinely unexpected exception
-    (as opposed to the {"status": "fail", ...} dict every check function
-    already returns for its own known failure modes) into the same shape,
-    so one bad check can't blank an entire refresh cycle for a target."""
-    try:
-        return fn(*args, **kwargs)
-    except Exception as exc:
-        return {"status": "fail", "error": f"internal error: {exc}"}
 
 _WIFI_QUALITY_COLOR = {"excellent": "green", "good": "green", "fair": "yellow", "poor": "red"}
 
@@ -282,7 +269,7 @@ class TargetDetailScreen(ModalScreen):
     def _write_traceroute(self, result: dict) -> None:
         log = self.query_one("#detail-body", RichLog)
         if result.get("status") != "ok":
-            log.write(f"[red]{result.get('message', 'traceroute failed')}[/red]")
+            log.write(f"[red]{result.get('error', 'traceroute failed')}[/red]")
             return
         for hop in result.get("hops", []):
             addr = hop.get("address", "*")
@@ -618,6 +605,11 @@ class NetHealthTUI(App):
         # {target: monotonic timestamp of last history write} -- throttles
         # snapshot persistence to HISTORY_RECORD_INTERVAL (see _run_checks).
         self._history_last:   dict[str, float]        = {}
+        # Targets with a check worker still running. A slow target (every
+        # check timing out) used to get a fresh worker every refresh on top
+        # of the ones still running, so threads piled up without bound.
+        self._inflight:       set[str]                = set()
+        self._state_lock                              = threading.Lock()
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -902,10 +894,11 @@ class NetHealthTUI(App):
             return
 
         table.remove_row(row_key)
-        self._targets.remove(target)
+        with self._state_lock:
+            self._targets.remove(target)
+            self._states.pop(target, None)
         self._latency.pop(target, None)
         self._ping_stats.pop(target, None)
-        self._states.pop(target, None)
         self._latest.pop(target, None)
         self._latest_cells.pop(target, None)
 
@@ -1012,38 +1005,44 @@ class NetHealthTUI(App):
 
     # ── Worker ────────────────────────────────────────────────────────────────
 
-    @work(thread=True)
     def _run_checks(self, target: str) -> None:
-        # Each check is isolated (see _safe_check above): without it, one
-        # bad check would blank the entire cycle for this target -- no
-        # update, no alert, row stuck on "checking..." forever -- instead
-        # of just that one check showing FAIL.
-        dns_r  = _safe_check(dns_check, target)
-        ping_r = _safe_check(ping_check, target)
-        http_r = _safe_check(http_check, target)
-        port_r = _safe_check(port_check, target)
-        ssl_r  = _safe_check(ssl_check, target, timeout=5)
+        with self._state_lock:
+            if target in self._inflight:
+                return
+            self._inflight.add(target)
+        self._check_worker(target)
 
-        # Fire alerts on state transitions
-        results_map = {
-            "dns":  dns_r,
-            "ping": ping_r,
-            "http": http_r,
-            "port": port_r,
-            "ssl":  ssl_r,
-        }
-        failed_now: list[str] = []
+    @work(thread=True)
+    def _check_worker(self, target: str) -> None:
+        try:
+            self._check_cycle(target)
+        finally:
+            with self._state_lock:
+                self._inflight.discard(target)
+
+    def _check_cycle(self, target: str) -> None:
+        # All checks run concurrently and each is exception-isolated, so one
+        # broken check shows FAIL instead of blanking the whole row.
+        results_map = checks.run_target_checks(target, checks.MONITOR_CHECKS)
+
+        failed: list[tuple[str, str]] = []
         recovered_now: list[str] = []
-        for check_name, result in results_map.items():
-            new_state = result["status"]  # "ok" or "fail"
-            old_state = self._states[target][check_name]
-            if new_state == "fail" and old_state != "fail":
-                error = result.get("error", result.get("message", "check failed"))
-                alerts_mod.fire(target, check_name, str(error), self._alert_cfg)
-                failed_now.append(check_name.upper())
-            elif new_state == "ok" and old_state == "fail":
-                recovered_now.append(check_name.upper())
-            self._states[target][check_name] = new_state
+        with self._state_lock:
+            if target not in self._targets:
+                return  # removed while this cycle was running
+            for check_name, result in results_map.items():
+                new_state = result["status"]  # "ok" or "fail"
+                old_state = self._states[target][check_name]
+                if new_state == "fail" and old_state != "fail":
+                    failed.append((check_name, str(result.get("error", "check failed"))))
+                elif new_state == "ok" and old_state == "fail":
+                    recovered_now.append(check_name.upper())
+                self._states[target][check_name] = new_state
+
+        # Network I/O (webhooks) stays outside the lock.
+        for check_name, error in failed:
+            alerts_mod.fire(target, check_name, error, self._alert_cfg)
+        failed_now = [name.upper() for name, _ in failed]
 
         if failed_now:
             self.call_from_thread(
@@ -1058,7 +1057,7 @@ class NetHealthTUI(App):
 
         self._maybe_record_history(target, results_map)
 
-        self.call_from_thread(self._update_ui, target, dns_r, ping_r, http_r, port_r, ssl_r)
+        self.call_from_thread(self._update_ui, target, results_map)
 
     def _maybe_record_history(self, target: str, results_map: dict) -> None:
         """Persist a check snapshot for the Report tab, throttled per target.
@@ -1079,8 +1078,17 @@ class NetHealthTUI(App):
 
     # ── UI update ─────────────────────────────────────────────────────────────
 
-    def _update_ui(self, target, dns_r, ping_r, http_r, port_r, ssl_r) -> None:
+    def _update_ui(self, target: str, results: dict) -> None:
+        # A worker that started before the target was removed can finish
+        # after it -- updating the gone row raised CellDoesNotExist.
+        if target not in self._targets:
+            return
+
         def _ok(r): return r["status"] == "ok"
+
+        dns_r, ping_r, http_r, port_r, ssl_r = (
+            results[k] for k in ("dns", "ping", "http", "port", "ssl")
+        )
 
         # Ping stats
         stats = self._ping_stats[target]
@@ -1107,7 +1115,7 @@ class NetHealthTUI(App):
 
         # Cells
         dns_cell  = _cell(f"{dns_r.get('latency',0):.0f} ms",        _ok(dns_r))  if _ok(dns_r)  else _cell("FAIL", False)
-        ping_cell = _cell(f"{avg:.0f} ms  loss {loss_pct:.0f}%", ping_ok) if (ping_ok and avg) else _cell("FAIL", False)
+        ping_cell = _cell(f"{avg:.0f} ms  loss {loss_pct:.0f}%", ping_ok) if (ping_ok and avg is not None) else _cell("FAIL", False)
         http_label, http_display_ok = _http_display(http_r)
         http_cell = _cell(http_label, http_display_ok)
         open_p    = [str(x["port"]) for x in port_r.get("results",[]) if x["status"]=="open"]
@@ -1148,7 +1156,7 @@ class NetHealthTUI(App):
         color  = "green" if all_ok else "red"
         self._log(
             f"[{color}]{icons}[/{color}] [bold]{target}[/bold]"
-            + (f"  {avg:.0f} ms" if (ping_ok and avg) else "")
+            + (f"  {avg:.0f} ms" if (ping_ok and avg is not None) else "")
             + (f"  loss {loss_pct:.0f}%" if stats[0] > 1 else "")
             + f"  [dim]{now}[/dim]"
         )
@@ -1171,9 +1179,9 @@ class NetHealthTUI(App):
         dr = data["date_range"]
         panel.write(f"[bold cyan]nethealth report[/bold cyan]  [dim]{dr[0]} → {dr[1]}[/dim]  ({data['entries_total']} runs)\n")
 
-        for tgt, checks in data["per_target"].items():
+        for tgt, check_stats in data["per_target"].items():
             panel.write(f"[bold]{tgt}[/bold]")
-            for check_name, stats in checks.items():
+            for check_name, stats in check_stats.items():
                 pct = stats["pass_pct"]
                 pc  = "green" if pct == 100 else ("yellow" if pct >= 80 else "red")
                 avg = stats.get("avg_ms") or stats.get("avg_latency_ms")

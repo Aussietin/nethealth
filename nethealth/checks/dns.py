@@ -18,7 +18,7 @@ def dns_check(host: str, resolver_addr: str | None = None) -> dict:
         dict: Result containing 'status', 'latency' (ms), and optionally
         'resolver' when a custom server was specified.
     """
-    start = time.time()
+    start = time.perf_counter()
     try:
         if resolver_addr:
             resolver = dns.resolver.Resolver(configure=False)
@@ -26,7 +26,7 @@ def dns_check(host: str, resolver_addr: str | None = None) -> dict:
             resolver.resolve(host, "A")
         else:
             dns.resolver.resolve(host, "A")
-        latency = (time.time() - start) * 1000
+        latency = (time.perf_counter() - start) * 1000
         result: dict = {"name": "DNS", "status": "ok", "latency": latency}
         if resolver_addr:
             result["resolver"] = resolver_addr

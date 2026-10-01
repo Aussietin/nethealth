@@ -7,24 +7,17 @@ import pytest
 from textual.widgets import Input
 
 import nethealth.tui as tui_mod
+from nethealth import checks
 from nethealth import config as cfg_mod
 from nethealth.tui import NetHealthTUI
 
 
 @pytest.mark.asyncio
 async def test_run_checks_isolates_one_failing_check(monkeypatch):
-    monkeypatch.setattr(tui_mod, "dns_check", lambda t: {"status": "ok", "latency": 5})
-    monkeypatch.setattr(tui_mod, "ping_check", lambda t: {"status": "ok", "avg_ms": 5.0})
-    monkeypatch.setattr(tui_mod, "http_check", lambda t: {"status": "ok", "code": 200})
-    monkeypatch.setattr(
-        tui_mod, "port_check",
-        lambda t: {"status": "ok", "results": [{"port": 443, "status": "open"}]},
-    )
-
-    def _boom(t, timeout=5):
+    def _boom(t):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(tui_mod, "ssl_check", _boom)
+    monkeypatch.setitem(checks.TARGET_CHECKS, "ssl", _boom)
 
     app = NetHealthTUI(["example.com"], refresh_interval=9999)
     async with app.run_test() as pilot:

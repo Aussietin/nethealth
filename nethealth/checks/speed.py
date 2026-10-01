@@ -1,10 +1,8 @@
-import httpx
+from __future__ import annotations
+
 import time
 
-_TEST_SIZES = [
-    ("10 MB",  "https://speed.cloudflare.com/__down?bytes=10000000"),
-    ("25 MB",  "https://speed.cloudflare.com/__down?bytes=25000000"),
-]
+import httpx
 
 
 def speed_check(size_mb: int = 10, timeout: int = 30) -> dict:

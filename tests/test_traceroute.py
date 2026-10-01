@@ -14,8 +14,8 @@ def test_system_traceroute_missing_binary(monkeypatch):
     monkeypatch.setattr(tr_mod.subprocess, "run", _raise)
     result = tr_mod._system_traceroute("example.com")
     assert result["status"] == "fail"
-    assert "traceroute" in result["message"].lower()
-    assert "not found" in result["message"].lower()
+    assert "traceroute" in result["error"].lower()
+    assert "not found" in result["error"].lower()
 
 
 def test_system_traceroute_timeout(monkeypatch):
@@ -25,7 +25,7 @@ def test_system_traceroute_timeout(monkeypatch):
     monkeypatch.setattr(tr_mod.subprocess, "run", _raise)
     result = tr_mod._system_traceroute("example.com")
     assert result["status"] == "fail"
-    assert "timed out" in result["message"].lower()
+    assert "timed out" in result["error"].lower()
 
 
 def test_system_traceroute_parses_hops(monkeypatch):

@@ -1,5 +1,8 @@
-import httpx
+from __future__ import annotations
+
 import time
+
+import httpx
 
 
 def _request(url: str, timeout: float, method: str, headers: dict | None) -> tuple[int, float]:
@@ -10,13 +13,13 @@ def _request(url: str, timeout: float, method: str, headers: dict | None) -> tup
     # test_checks_mocked.py patch onto `httpx.get` -- routing everything
     # through httpx.request silently bypassed those mocks (they only ever
     # patch httpx.get) and made the tests exercise real network calls.
-    start = time.time()
+    start = time.perf_counter()
     fn = httpx.head if method == "HEAD" else httpx.get
     if headers:
         r = fn(url, timeout=timeout, headers=headers)
     else:
         r = fn(url, timeout=timeout)
-    latency = (time.time() - start) * 1000
+    latency = (time.perf_counter() - start) * 1000
     return r.status_code, latency
 
 

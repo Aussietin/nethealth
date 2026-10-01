@@ -20,7 +20,7 @@ def _cfg(**overrides) -> dict:
 def test_fire_does_nothing_when_alerts_disabled(monkeypatch):
     calls = []
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: calls.append(("desktop", a)))
-    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: calls.append(("webhook", a)))
+    monkeypatch.setattr(alerts_mod, "_post", lambda *a: calls.append(("webhook", a)))
 
     alerts_mod.fire("example.com", "dns", "timeout", _cfg(enabled=False, webhook_url="https://x"))
     assert calls == []
@@ -29,7 +29,7 @@ def test_fire_does_nothing_when_alerts_disabled(monkeypatch):
 def test_fire_desktop_only_when_no_webhook_url(monkeypatch):
     calls = []
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: calls.append(("desktop", a)))
-    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: calls.append(("webhook", a)))
+    monkeypatch.setattr(alerts_mod, "_post", lambda *a: calls.append(("webhook", a)))
 
     alerts_mod.fire("example.com", "dns", "timeout", _cfg())
     assert [c[0] for c in calls] == ["desktop"]
@@ -38,7 +38,7 @@ def test_fire_desktop_only_when_no_webhook_url(monkeypatch):
 def test_fire_skips_desktop_when_disabled(monkeypatch):
     calls = []
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: calls.append(("desktop", a)))
-    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: calls.append(("webhook", a)))
+    monkeypatch.setattr(alerts_mod, "_post", lambda *a: calls.append(("webhook", a)))
 
     alerts_mod.fire("example.com", "dns", "timeout", _cfg(desktop=False, webhook_url="https://x"))
     assert [c[0] for c in calls] == ["webhook"]
@@ -47,7 +47,7 @@ def test_fire_skips_desktop_when_disabled(monkeypatch):
 def test_fire_calls_both_when_both_configured(monkeypatch):
     calls = []
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: calls.append(("desktop", a)))
-    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: calls.append(("webhook", a)))
+    monkeypatch.setattr(alerts_mod, "_post", lambda *a: calls.append(("webhook", a)))
 
     alerts_mod.fire("example.com", "dns", "timeout", _cfg(webhook_url="https://hooks.example/x"))
     assert [c[0] for c in calls] == ["desktop", "webhook"]
@@ -61,7 +61,7 @@ def test_fire_webhook_payload_shape(monkeypatch):
         captured["payload"] = payload
 
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: None)
-    monkeypatch.setattr(alerts_mod, "_webhook", _fake_webhook)
+    monkeypatch.setattr(alerts_mod, "_post", _fake_webhook)
 
     alerts_mod.fire("example.com", "ping", "100% packet loss", _cfg(webhook_url="https://hooks.example/x"))
     assert captured["url"] == "https://hooks.example/x"
@@ -77,7 +77,7 @@ def test_fire_defaults_desktop_and_enabled_true_when_keys_missing(monkeypatch):
     `enabled`/`desktop` keys existed shouldn't go silent."""
     calls = []
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: calls.append("desktop"))
-    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: calls.append("webhook"))
+    monkeypatch.setattr(alerts_mod, "_post", lambda *a: calls.append("webhook"))
 
     alerts_mod.fire("example.com", "dns", "timeout", {})  # no keys at all
     assert calls == ["desktop"]
@@ -119,7 +119,9 @@ def test_desktop_swallows_any_subprocess_error(monkeypatch):
     alerts_mod._desktop("title", "body")  # must not raise
 
 
-def test_desktop_uses_osascript_on_macos(monkeypatch):
+def test_desktop_passes_text_to_osascript_as_argv(monkeypatch):
+    """Title/body go in argv, never into the AppleScript source -- an error
+    string with a double quote used to break (or inject into) the script."""
     captured = {}
 
     def _fake_run(cmd, timeout=None, capture_output=None):
@@ -128,142 +130,74 @@ def test_desktop_uses_osascript_on_macos(monkeypatch):
 
     monkeypatch.setattr(alerts_mod.sys, "platform", "darwin")
     monkeypatch.setattr(alerts_mod.subprocess, "run", _fake_run)
-    alerts_mod._desktop("nethealth - DNS FAIL", "example.com: timeout")
+    body = 'example.com: bad "quoted" error'
+    alerts_mod._desktop("nethealth - DNS FAIL", body)
 
-    assert captured["cmd"][0] == "osascript"
-    assert "example.com: timeout" in captured["cmd"][2]
-    assert "nethealth - DNS FAIL" in captured["cmd"][2]
-
-
-# ── _webhook() ───────────────────────────────────────────────────────────
-
-def test_webhook_noop_on_empty_url():
-    # No httpx patch at all -- if this tried to POST it would fail (no
-    # network in this call path) or hang; reaching the end proves it
-    # returned early.
-    alerts_mod._webhook("", {"target": "x"})
+    cmd = captured["cmd"]
+    assert cmd[0] == "osascript"
+    assert cmd[-2:] == ["nethealth - DNS FAIL", body]
+    script = " ".join(cmd[1:-2])
+    assert "quoted" not in script
 
 
-def test_webhook_posts_json_payload(monkeypatch):
+# ── _post() and the webhook body builders ────────────────────────────────
+
+_PAYLOAD = {"target": "example.com", "check": "dns", "status": "fail",
+            "error": "timeout", "timestamp": "2026-09-05T10:00:00"}
+
+
+def test_post_sends_json(monkeypatch):
     import httpx
     captured = {}
 
     def _fake_post(url, json=None, timeout=None):
-        captured["url"] = url
-        captured["json"] = json
-        captured["timeout"] = timeout
+        captured.update(url=url, json=json, timeout=timeout)
 
     monkeypatch.setattr(httpx, "post", _fake_post)
-    payload = {"target": "example.com", "check": "dns", "status": "fail"}
-    alerts_mod._webhook("https://hooks.example/x", payload)
-
-    assert captured["url"] == "https://hooks.example/x"
-    assert captured["json"] == payload
+    alerts_mod._post("https://hooks.example/x", {"a": 1})
+    assert captured == {"url": "https://hooks.example/x", "json": {"a": 1}, "timeout": 5}
 
 
-def test_webhook_swallows_request_errors(monkeypatch):
+def test_post_swallows_request_errors(monkeypatch):
     import httpx
 
     def _raise(url, json=None, timeout=None):
         raise httpx.ConnectError("refused")
 
     monkeypatch.setattr(httpx, "post", _raise)
-    alerts_mod._webhook("https://hooks.example/x", {"target": "x"})  # must not raise
+    alerts_mod._post("https://hooks.example/x", {"target": "x"})  # must not raise
 
 
-# ── fire() dispatch to Slack / Teams ────────────────────────────────────
+def test_slack_body_is_formatted_text():
+    text = alerts_mod._slack_body(_PAYLOAD)["text"]
+    assert "example.com" in text and "DNS" in text
 
-def test_fire_calls_slack_and_teams_when_configured(monkeypatch):
-    calls = []
+
+def test_teams_body_is_message_card():
+    card = alerts_mod._teams_body(_PAYLOAD)
+    assert card["@type"] == "MessageCard"
+    assert card["summary"].startswith("nethealth")
+
+
+def test_fire_routes_each_configured_webhook(monkeypatch):
+    posts = []
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: None)
-    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: None)
-    monkeypatch.setattr(alerts_mod, "_slack", lambda *a: calls.append(("slack", a)))
-    monkeypatch.setattr(alerts_mod, "_teams", lambda *a: calls.append(("teams", a)))
+    monkeypatch.setattr(alerts_mod, "_post", lambda url, body: posts.append((url, body)))
 
-    cfg = _cfg(slack_webhook_url="https://hooks.slack.example/x",
+    cfg = _cfg(webhook_url="https://generic.example/x",
+               slack_webhook_url="https://hooks.slack.example/x",
                teams_webhook_url="https://outlook.office.com/webhook/x")
     alerts_mod.fire("example.com", "dns", "timeout", cfg)
-    assert {c[0] for c in calls} == {"slack", "teams"}
+
+    by_url = dict(posts)
+    assert by_url["https://generic.example/x"]["target"] == "example.com"
+    assert "text" in by_url["https://hooks.slack.example/x"]
+    assert by_url["https://outlook.office.com/webhook/x"]["@type"] == "MessageCard"
 
 
-def test_fire_skips_slack_and_teams_when_not_configured(monkeypatch):
-    calls = []
+def test_fire_skips_unconfigured_webhooks(monkeypatch):
+    posts = []
     monkeypatch.setattr(alerts_mod, "_desktop", lambda *a: None)
-    monkeypatch.setattr(alerts_mod, "_webhook", lambda *a: None)
-    monkeypatch.setattr(alerts_mod, "_slack", lambda *a: calls.append("slack"))
-    monkeypatch.setattr(alerts_mod, "_teams", lambda *a: calls.append("teams"))
-
+    monkeypatch.setattr(alerts_mod, "_post", lambda *a: posts.append(a))
     alerts_mod.fire("example.com", "dns", "timeout", _cfg())
-    assert calls == []
-
-
-# ── _slack() / _teams() ──────────────────────────────────────────────────
-
-def test_slack_noop_on_empty_url():
-    alerts_mod._slack("", {"target": "x", "check": "dns", "status": "fail",
-                            "error": "timeout", "timestamp": "now"})
-
-
-def test_slack_posts_formatted_message(monkeypatch):
-    import httpx
-    captured = {}
-
-    def _fake_post(url, json=None, timeout=None):
-        captured["url"] = url
-        captured["json"] = json
-
-    monkeypatch.setattr(httpx, "post", _fake_post)
-    payload = {"target": "example.com", "check": "dns", "status": "fail",
-               "error": "timeout", "timestamp": "2026-09-05T10:00:00"}
-    alerts_mod._slack("https://hooks.slack.example/x", payload)
-
-    assert captured["url"] == "https://hooks.slack.example/x"
-    assert "example.com" in captured["json"]["text"]
-    assert "DNS" in captured["json"]["text"]
-
-
-def test_slack_swallows_request_errors(monkeypatch):
-    import httpx
-
-    def _raise(url, json=None, timeout=None):
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(httpx, "post", _raise)
-    payload = {"target": "x", "check": "dns", "status": "fail",
-               "error": "e", "timestamp": "now"}
-    alerts_mod._slack("https://hooks.slack.example/x", payload)  # must not raise
-
-
-def test_teams_noop_on_empty_url():
-    alerts_mod._teams("", {"target": "x", "check": "dns", "status": "fail",
-                            "error": "timeout", "timestamp": "now"})
-
-
-def test_teams_posts_message_card(monkeypatch):
-    import httpx
-    captured = {}
-
-    def _fake_post(url, json=None, timeout=None):
-        captured["url"] = url
-        captured["json"] = json
-
-    monkeypatch.setattr(httpx, "post", _fake_post)
-    payload = {"target": "example.com", "check": "dns", "status": "fail",
-               "error": "timeout", "timestamp": "2026-09-05T10:00:00"}
-    alerts_mod._teams("https://outlook.office.com/webhook/x", payload)
-
-    assert captured["url"] == "https://outlook.office.com/webhook/x"
-    assert captured["json"]["@type"] == "MessageCard"
-    assert captured["json"]["summary"].startswith("nethealth")
-
-
-def test_teams_swallows_request_errors(monkeypatch):
-    import httpx
-
-    def _raise(url, json=None, timeout=None):
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(httpx, "post", _raise)
-    payload = {"target": "x", "check": "dns", "status": "fail",
-               "error": "e", "timestamp": "now"}
-    alerts_mod._teams("https://outlook.office.com/webhook/x", payload)  # must not raise
+    assert posts == []

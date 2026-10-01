@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import select
 import socket
@@ -123,7 +125,7 @@ def packet_sniffer_check(
         return {
             "name": "PacketSniffer",
             "status": "fail",
-            "message": "Packet sniffing requires Linux and AF_PACKET support.",
+            "error": "Packet sniffing requires Linux and AF_PACKET support.",
         }
 
     packet_count = max(1, packet_count)
@@ -141,15 +143,13 @@ def packet_sniffer_check(
         return {
             "name": "PacketSniffer",
             "status": "fail",
-            "message": "Permission denied. Packet sniffing requires root privileges.",
-            "error": str(exc),
+            "error": f"Permission denied. Packet sniffing requires root privileges. ({exc})",
         }
     except OSError as exc:
         return {
             "name": "PacketSniffer",
             "status": "fail",
-            "message": f"Unable to open raw socket on interface '{interface}'.",
-            "error": str(exc),
+            "error": f"Unable to open raw socket on interface '{interface}'. ({exc})",
         }
 
     end_time = time.time() + timeout

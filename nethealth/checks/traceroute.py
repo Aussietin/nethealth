@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import os
 import socket
 import struct
 import subprocess
 import sys
 import time
+
+
+def _fail(error: str) -> dict:
+    return {"name": "Traceroute", "status": "fail", "error": error}
 
 
 def _parse_ipv4_header(data: bytes) -> dict:
@@ -41,6 +47,54 @@ def _parse_inner_udp_port(data: bytes) -> int:
     return dest_port
 
 
+def _classify_icmp_reply(packet: bytes, probe_port: int) -> str | None:
+    """Return the hop type if ``packet`` is the ICMP reply to *our* probe,
+    else None. Offsets come from the IHL fields rather than assuming a
+    20-byte IP header (IP options make it longer)."""
+    icmp = _parse_ipv4_header(packet)["payload"]
+    if len(icmp) < 8:
+        return None
+    icmp_type, icmp_code, _ = _unpack_icmp_header(icmp)
+    if (icmp_type, icmp_code) not in ((11, 0), (3, 3)):
+        return f"icmp_{icmp_type}_{icmp_code}"
+    quoted = icmp[8:]  # original IP header + first 8 bytes of our UDP probe
+    if len(quoted) < 20:
+        return None
+    inner_ihl = (quoted[0] & 0x0F) * 4
+    if _parse_inner_udp_port(quoted[inner_ihl:inner_ihl + 8]) != probe_port:
+        return None
+    return "time_exceeded" if icmp_type == 11 else "destination_reached"
+
+
+def _await_hop_reply(recv_socket: socket.socket, probe_port: int, timeout: float) -> dict:
+    """Read ICMP replies until one answers ``probe_port`` or ``timeout`` runs
+    out. Stray ICMP (another process's ping, a late reply to an earlier TTL)
+    is skipped. The previous loop `continue`d to the next TTL on the first
+    stray packet, silently dropping that hop from the output."""
+    start = time.perf_counter()
+    deadline = start + timeout
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return {"address": "*", "latency": None, "type": "timeout"}
+        recv_socket.settimeout(remaining)
+        try:
+            packet, addr = recv_socket.recvfrom(65535)
+        except socket.timeout:
+            return {"address": "*", "latency": None, "type": "timeout"}
+        try:
+            kind = _classify_icmp_reply(packet, probe_port)
+        except struct.error:
+            continue
+        if kind is None:
+            continue
+        return {
+            "address": addr[0],
+            "latency": round((time.perf_counter() - start) * 1000, 1),
+            "type": kind,
+        }
+
+
 def _raw_traceroute(target: str, max_hops: int = 30, timeout: int = 2) -> dict:
     addr_info = socket.getaddrinfo(target, None, socket.AF_INET, socket.SOCK_DGRAM)
     if not addr_info:
@@ -50,74 +104,17 @@ def _raw_traceroute(target: str, max_hops: int = 30, timeout: int = 2) -> dict:
     hops = []
     port_base = 33434
 
-    try:
-        recv_socket = socket.socket(
-            socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP
-        )
-        recv_socket.settimeout(timeout)
-    except PermissionError as exc:
-        raise
-
+    recv_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
     send_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-
     try:
         for ttl in range(1, max_hops + 1):
             send_socket.setsockopt(socket.SOL_IP, socket.IP_TTL, ttl)
             probe_port = port_base + ttl
             send_socket.sendto(b"", (dest_ip, probe_port))
-            start = time.time()
-
-            try:
-                packet, addr = recv_socket.recvfrom(65535)
-                elapsed_ms = round((time.time() - start) * 1000, 1)
-                src_ip = addr[0]
-
-                ip_info = _parse_ipv4_header(packet)
-                icmp_type, icmp_code, _ = _unpack_icmp_header(packet[20:24])
-
-                if icmp_type == 11 and icmp_code == 0:
-                    inner_ip_header = packet[28:48]
-                    inner_udp_header = packet[48:56]
-                    inner_dest_port = _parse_inner_udp_port(inner_udp_header)
-                    if inner_dest_port != probe_port:
-                        continue
-                    hops.append(
-                        {
-                            "hop": ttl,
-                            "address": src_ip,
-                            "latency": elapsed_ms,
-                            "type": "time_exceeded",
-                        }
-                    )
-                elif icmp_type == 3 and icmp_code == 3:
-                    inner_ip_header = packet[28:48]
-                    inner_udp_header = packet[48:56]
-                    inner_dest_port = _parse_inner_udp_port(inner_udp_header)
-                    if inner_dest_port != probe_port:
-                        continue
-                    hops.append(
-                        {
-                            "hop": ttl,
-                            "address": src_ip,
-                            "latency": elapsed_ms,
-                            "type": "destination_reached",
-                        }
-                    )
-                    break
-                else:
-                    hops.append(
-                        {
-                            "hop": ttl,
-                            "address": src_ip,
-                            "latency": elapsed_ms,
-                            "type": f"icmp_{icmp_type}_{icmp_code}",
-                        }
-                    )
-
-            except socket.timeout:
-                hops.append(
-                    {"hop": ttl, "address": "*", "latency": None, "type": "timeout"}
-                )
+            hop = {"hop": ttl, **_await_hop_reply(recv_socket, probe_port, timeout)}
+            hops.append(hop)
+            if hop["type"] == "destination_reached":
+                break
     finally:
         recv_socket.close()
         send_socket.close()
@@ -131,6 +128,29 @@ def _raw_traceroute(target: str, max_hops: int = 30, timeout: int = 2) -> dict:
     }
 
 
+def _parse_system_output(stdout: str) -> list[dict]:
+    hops = []
+    for line in stdout.splitlines()[1:]:
+        parts = line.split()
+        if not parts or not parts[0].isdigit():
+            continue
+
+        hop_addr = "*"
+        hop_latency = None
+        for i, part in enumerate(parts):
+            if part.startswith("(") and part.endswith(")"):
+                hop_addr = part.strip("()")
+            elif part == "ms" and i > 0:
+                try:
+                    hop_latency = float(parts[i - 1])
+                    break
+                except ValueError:
+                    continue
+
+        hops.append({"hop": int(parts[0]), "address": hop_addr, "latency": hop_latency, "type": "system"})
+    return hops
+
+
 def _system_traceroute(target: str, max_hops: int = 30) -> dict:
     try:
         proc = subprocess.run(
@@ -139,64 +159,21 @@ def _system_traceroute(target: str, max_hops: int = 30) -> dict:
             text=True,
             timeout=max_hops * 2 + 5,
         )
-
-        if proc.returncode != 0:
-            return {
-                "name": "Traceroute",
-                "status": "fail",
-                "message": proc.stderr.strip() or "Traceroute failed",
-            }
-
-        lines = proc.stdout.splitlines()
-        hops = []
-        for line in lines[1:]:
-            parts = line.split()
-            if not parts:
-                continue
-
-            hop_num = parts[0]
-            hop_addr = "*"
-            hop_latency = None
-
-            for i, part in enumerate(parts):
-                if "(" in part and ")" in part:
-                    hop_addr = part.strip("()")
-                elif "ms" in part and i > 0:
-                    try:
-                        hop_latency = float(parts[i - 1])
-                        break
-                    except ValueError:
-                        continue
-
-            hops.append(
-                {
-                    "hop": hop_num,
-                    "address": hop_addr,
-                    "latency": hop_latency,
-                    "type": "system",
-                }
-            )
-
-        return {
-            "name": "Traceroute",
-            "status": "ok",
-            "method": "system",
-            "hops": hops,
-            "target": target,
-        }
-
     except subprocess.TimeoutExpired:
-        return {
-            "name": "Traceroute",
-            "status": "fail",
-            "message": "Traceroute timed out",
-        }
+        return _fail("Traceroute timed out")
     except FileNotFoundError:
-        return {
-            "name": "Traceroute",
-            "status": "fail",
-            "message": "'traceroute' command not found. Install it (e.g. sudo apt install traceroute).",
-        }
+        return _fail("'traceroute' command not found. Install it (e.g. sudo apt install traceroute).")
+
+    if proc.returncode != 0:
+        return _fail(proc.stderr.strip() or "Traceroute failed")
+
+    return {
+        "name": "Traceroute",
+        "status": "ok",
+        "method": "system",
+        "hops": _parse_system_output(proc.stdout),
+        "target": target,
+    }
 
 
 def traceroute_check(target: str, max_hops: int = 30) -> dict:
@@ -207,10 +184,6 @@ def traceroute_check(target: str, max_hops: int = 30) -> dict:
         except PermissionError:
             return _system_traceroute(target, max_hops=max_hops)
         except Exception as exc:
-            return {
-                "name": "Traceroute",
-                "status": "fail",
-                "message": str(exc),
-            }
+            return _fail(str(exc))
 
     return _system_traceroute(target, max_hops=max_hops)

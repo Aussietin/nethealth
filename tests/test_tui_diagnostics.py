@@ -84,12 +84,11 @@ async def test_health_bar_excludes_target_with_http_error_code(monkeypatch):
         monkeypatch.setattr(health, "update", lambda text, **kw: captured.append(text))
 
         ok = {"status": "ok"}
-        app._update_ui(
-            "example.com",
-            dict(ok, latency=5),
-            dict(ok, avg_ms=5.0),
-            dict(ok, code=500),  # HTTP "succeeded" but server errored
-            dict(ok, results=[{"port": 443, "status": "open"}]),
-            dict(ok, days_left=90),
-        )
+        app._update_ui("example.com", {
+            "dns": dict(ok, latency=5),
+            "ping": dict(ok, avg_ms=5.0),
+            "http": dict(ok, code=500),  # HTTP "succeeded" but server errored
+            "port": dict(ok, results=[{"port": 443, "status": "open"}]),
+            "ssl": dict(ok, days_left=90),
+        })
         assert "0/1 healthy" in captured[-1]

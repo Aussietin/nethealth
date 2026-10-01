@@ -69,14 +69,13 @@ async def test_filtered_out_target_keeps_updating_in_background():
         assert table.row_count == 1
 
         ok = {"status": "ok"}
-        app._update_ui(
-            "1.1.1.1",
-            dict(ok, latency=5),
-            dict(ok, avg_ms=5.0),
-            dict(ok, code=200),
-            dict(ok, results=[{"port": 443, "status": "open"}]),
-            dict(ok, days_left=90),
-        )
+        app._update_ui("1.1.1.1", {
+            "dns": dict(ok, latency=5),
+            "ping": dict(ok, avg_ms=5.0),
+            "http": dict(ok, code=200),
+            "port": dict(ok, results=[{"port": 443, "status": "open"}]),
+            "ssl": dict(ok, days_left=90),
+        })
         assert "1.1.1.1" in app._latest
         assert table.row_count == 1  # still hidden -- not added to the table
 
