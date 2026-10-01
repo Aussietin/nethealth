@@ -1,110 +1,41 @@
-import click
-import json
-import csv
-import os
-import time
-import signal
-import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from pathlib import Path
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.live import Live
-from rich import box
+from __future__ import annotations
 
+import json
+import os
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+import click
+from rich import box
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+
+from nethealth import checks
+from nethealth import report as report_mod
 from nethealth.checks.dns import dns_check
-from nethealth.checks.ping import ping_check
 from nethealth.checks.http import http_check
-from nethealth.checks.traceroute import traceroute_check
-from nethealth.checks.port import port_check
-from nethealth.checks.ping_monitor import monitor_ping
 from nethealth.checks.packet_sniffer import packet_sniffer_check
+from nethealth.checks.ping import ping_check
+from nethealth.checks.ping_monitor import monitor_ping
+from nethealth.checks.port import port_check
+from nethealth.checks.traceroute import traceroute_check
+from nethealth.formatting import LABELS, detail, fmt_dns, fmt_duration, fmt_http, fmt_ping
 
 console = Console()
 
-
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
 
 def _fmt_status(status: str) -> str:
     return "[green]✅  OK[/green]" if status == "ok" else "[red]❌  FAIL[/red]"
 
 
-def _fmt_dns(result: dict) -> str:
-    if result["status"] == "ok":
-        parts = [f"{result['latency']:.1f}ms"]
-        if result.get("resolver"):
-            parts.append(f"via {result['resolver']}")
-        return "  ".join(parts)
-    return result.get("error", "failed")
-
-
-def _fmt_ping(result: dict) -> str:
-    if result["status"] == "ok":
-        avg = result.get("avg_ms")
-        return f"{avg:.1f}ms avg" if avg is not None else "ok"
-    return result.get("error", "failed")
-
-
-def _fmt_http(result: dict) -> str:
-    if result["status"] == "ok":
-        method = result.get("method", "GET")
-        method_tag = f"[{method}] " if method != "GET" else ""
-        return f"{method_tag}HTTP {result.get('code', '?')}  ·  {result.get('latency', 0):.0f}ms"
-    return result.get("error", "failed")
-
-
-def _fmt_port(result: dict) -> str:
-    open_ports = [str(r["port"]) for r in result.get("results", []) if r["status"] == "open"]
-    return f"open: {', '.join(open_ports)}" if open_ports else "all closed"
-
-
-_MAX_HISTORY_ENTRIES = 5000  # keep --save json from growing unbounded over months of use
-
-
-def _save_history(target: str, results: dict, fmt: str) -> Path:
-    history_dir = Path.home() / ".nethealth"
-    history_dir.mkdir(exist_ok=True)
-    ts = datetime.now().isoformat()
-
+def _save_history(target: str, results: dict, fmt: str):
     if fmt == "json":
-        path = history_dir / "history.json"
-        history = []
-        if path.exists():
-            try:
-                loaded = json.loads(path.read_text())
-                if isinstance(loaded, list):
-                    history = loaded
-                else:
-                    raise ValueError("history.json root is not a list")
-            except Exception as exc:
-                console.print(
-                    f"  [yellow]Warning: {path} was unreadable ({exc}) -- "
-                    f"starting a fresh history file (old one left on disk).[/yellow]"
-                )
-        history.append({"timestamp": ts, "target": target, "results": results})
-        if len(history) > _MAX_HISTORY_ENTRIES:
-            history = history[-_MAX_HISTORY_ENTRIES:]
-        path.write_text(json.dumps(history, indent=2))
-        return path
-
-    path = history_dir / "history.csv"
-    write_header = not path.exists()
-    rows = [
-        {"timestamp": ts, "target": target, "check": "DNS",  "status": results["dns"]["status"],  "detail": _fmt_dns(results["dns"])},
-        {"timestamp": ts, "target": target, "check": "Ping", "status": results["ping"]["status"], "detail": _fmt_ping(results["ping"])},
-        {"timestamp": ts, "target": target, "check": "HTTP", "status": results["http"]["status"], "detail": _fmt_http(results["http"])},
-        {"timestamp": ts, "target": target, "check": "Port", "status": results["port"]["status"], "detail": _fmt_port(results["port"])},
-    ]
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["timestamp", "target", "check", "status", "detail"])
-        if write_header:
-            writer.writeheader()
-        writer.writerows(rows)
-    return path
+        return report_mod.record_check(target, results)
+    return report_mod.record_check_csv(target, results, report_mod.HISTORY_PATH.with_suffix(".csv"))
 
 
 # ---------------------------------------------------------------------------
@@ -150,54 +81,20 @@ def help_command(ctx, command):
 # check — parallel, multi-target
 # ---------------------------------------------------------------------------
 
-def _run_checks_for_target(target: str, skip_traceroute: bool) -> dict:
-    """Run all checks for a single target concurrently; return results dict."""
-    tasks = {
-        "dns":  lambda: dns_check(target),
-        "ping": lambda: ping_check(target),
-        "http": lambda: http_check(target),
-        "port": lambda: port_check(target),
-    }
-    if not skip_traceroute:
-        tasks["traceroute"] = lambda: traceroute_check(target, max_hops=15)
-
-    results = {}
-    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-        futures = {pool.submit(fn): name for name, fn in tasks.items()}
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                results[name] = future.result()
-            except Exception as exc:
-                results[name] = {"name": name.upper(), "status": "fail", "error": str(exc)}
-    return results
-
-
-def _print_check_table(target: str, results: dict, skip_traceroute: bool) -> int:
+def _print_check_table(target: str, results: dict) -> int:
     """Render the results table for one target; return number of passed checks."""
     table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold cyan", pad_edge=False)
     table.add_column("Check",  style="bold", width=14)
     table.add_column("Status", width=12)
     table.add_column("Detail", style="dim")
 
-    check_rows = [
-        ("DNS",  results["dns"],  _fmt_dns),
-        ("Ping", results["ping"], _fmt_ping),
-        ("HTTP", results["http"], _fmt_http),
-        ("Port", results["port"], _fmt_port),
-    ]
-    if not skip_traceroute and "traceroute" in results:
-        tr = results["traceroute"]
-        hop_count = len(tr.get("hops", []))
-        check_rows.append(("Traceroute", tr, lambda r: f"{hop_count} hops" if r["status"] == "ok" else r.get("message", "failed")))
-
     passed = 0
-    for name, result, fmt_fn in check_rows:
+    for name, result in results.items():
         if result["status"] == "ok":
             passed += 1
-        table.add_row(name, _fmt_status(result["status"]), fmt_fn(result))
+        table.add_row(LABELS[name], _fmt_status(result["status"]), detail(name, result))
 
-    total = len(check_rows)
+    total = len(results)
     color = "green" if passed == total else ("yellow" if passed > 0 else "red")
     icon  = "✅" if passed == total else ("⚠️ " if passed > 0 else "❌")
 
@@ -236,45 +133,25 @@ def check(targets, skip_traceroute, output_json, save):
     from nethealth.logger import get_logger
     log = get_logger(__name__)
 
-    all_results: dict[str, dict] = {}
-
-    # Run checks for each target; parallelise across targets too.
+    names = [n for n in checks.CLI_CHECKS if not (skip_traceroute and n == "traceroute")]
+    # run_target_checks isolates each check's exceptions, so a per-target
+    # future can't raise -- no fallback result needed here.
     with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
-        futures = {
-            pool.submit(_run_checks_for_target, t, skip_traceroute): t
-            for t in targets
-        }
-        for future in as_completed(futures):
-            tgt = futures[future]
-            try:
-                all_results[tgt] = future.result()
-            except Exception as exc:
-                all_results[tgt] = {
-                    "dns":  {"name": "DNS",  "status": "fail", "error": str(exc)},
-                    "ping": {"name": "Ping", "status": "fail", "error": str(exc)},
-                    "http": {"name": "HTTP", "status": "fail", "error": str(exc)},
-                    "port": {"name": "Port", "status": "fail", "error": str(exc)},
-                }
+        futures = {t: pool.submit(checks.run_target_checks, t, names) for t in targets}
+        all_results = {t: f.result() for t, f in futures.items()}
 
     if output_json:
         click.echo(json.dumps(
-            {
-                "timestamp": datetime.now().isoformat(),
-                "targets": {t: all_results[t] for t in targets},
-            },
+            {"timestamp": datetime.now().isoformat(), "targets": all_results},
             indent=2,
         ))
         return
 
-    # Print tables in the same order the user specified targets.
     for tgt in targets:
         results = all_results[tgt]
-        _print_check_table(tgt, results, skip_traceroute)
+        _print_check_table(tgt, results)
         log.info("check completed target=%s dns=%s ping=%s http=%s",
-                 tgt,
-                 results["dns"]["status"],
-                 results["ping"]["status"],
-                 results["http"]["status"])
+                 tgt, results["dns"]["status"], results["ping"]["status"], results["http"]["status"])
         if save:
             path = _save_history(tgt, results, save)
             console.print(f"  [dim]Saved → {path}[/dim]\n")
@@ -303,12 +180,14 @@ def status(target, output_json):
     if not output_json:
         console.print(f"\n  [dim]Checking your connection (via {target})…[/dim]")
 
-    gw = gateway_check()
-    d = dns_check(target)
-    p = ping_check(target)
-    h = http_check(target)
+    # Gateway and the per-target checks are independent -- run them together
+    # so the default command costs one slowest-check, not the sum of four.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        gw_future = pool.submit(gateway_check)
+        r = checks.run_target_checks(target, ("dns", "ping", "http"))
+        gw = gw_future.result()
 
-    result = diagnose(gateway=gw, dns=d, ping=p, http=h, target=target)
+    result = diagnose(gateway=gw, dns=r["dns"], ping=r["ping"], http=r["http"], target=target)
 
     if output_json:
         click.echo(json.dumps({
@@ -359,7 +238,7 @@ def dns(target, resolver):
     result = dns_check(target, resolver_addr=resolver)
     icon = "✅" if result["status"] == "ok" else "❌"
     resolver_tag = f"  [dim](via {resolver})[/dim]" if resolver else ""
-    console.print(f"{icon} [bold]DNS[/bold]  {target}  —  {_fmt_dns(result)}{resolver_tag}")
+    console.print(f"{icon} [bold]DNS[/bold]  {target}  —  {fmt_dns(result)}{resolver_tag}")
 
 
 @cli.command()
@@ -368,7 +247,7 @@ def ping(target):
     """ICMP ping check"""
     result = ping_check(target)
     icon = "✅" if result["status"] == "ok" else "❌"
-    console.print(f"{icon} [bold]Ping[/bold]  {target}  —  {_fmt_ping(result)}")
+    console.print(f"{icon} [bold]Ping[/bold]  {target}  —  {fmt_ping(result)}")
 
 
 @cli.command()
@@ -398,7 +277,7 @@ def http(target, use_head, extra_headers):
 
     result = http_check(target, method=method, headers=headers or None)
     icon = "✅" if result["status"] == "ok" else "❌"
-    console.print(f"{icon} [bold]HTTP[/bold]  {target}  —  {_fmt_http(result)}")
+    console.print(f"{icon} [bold]HTTP[/bold]  {target}  —  {fmt_http(result)}")
 
 
 @cli.command()
@@ -420,7 +299,7 @@ def traceroute(target, max_hops):
         console.print(f"[dim]method: {method}[/dim]\n")
         console.print(table)
     else:
-        console.print(f"[red]❌ Fail:[/red] {result['message']}")
+        console.print(f"[red]❌ Fail:[/red] {result['error']}")
 
 
 @cli.command()
@@ -504,7 +383,7 @@ def sniffer(interface, count, timeout):
     console.print(f"\n🕵️  Listening on [bold]{interface}[/bold] for up to [bold]{count}[/bold] packets ({timeout}s timeout)...\n")
     result = packet_sniffer_check(interface=interface, packet_count=count, timeout=timeout)
     if result["status"] != "ok":
-        console.print(f"[red]❌ {result['name']} failed —[/red] {result.get('message', 'Unknown error')}")
+        console.print(f"[red]❌ {result['name']} failed —[/red] {result.get('error', 'Unknown error')}")
         return
 
     console.print(f"[green]✅ Captured {result['packet_count']} packets from {result['interface']}[/green]\n")
@@ -593,56 +472,59 @@ def monitor_http_cmd(targets, interval):
                 t, status_str,
                 str(s["last_code"]) if s["last_code"] else "—",
                 f"[{uc}]{uptime:.1f}%[/{uc}]",
-                _fmt_duration(total_down) if total_down else "—",
+                fmt_duration(total_down) if total_down else "—",
                 s["last_checked"].strftime("%H:%M:%S") if s["last_checked"] else "—",
             )
         return tbl
 
-    running = True
-
-    def _stop(sig, frame):
-        nonlocal running
-        running = False
-
-    signal.signal(signal.SIGINT, _stop)
-
     console.print(f"\n  [bold]HTTP monitor[/bold]  {len(targets)} target(s) · every {interval}s · Ctrl+C to stop\n")
 
-    with Live(_make_table(), refresh_per_second=1, console=console) as live:
-        while running:
-            for t in targets:
-                if not running:
-                    break
-                r = http_check(t)
-                s = stats[t]
-                now = datetime.now()
-                s["total"] += 1
-                s["last_checked"] = now
-                s["last_status"] = r["status"]
-                s["last_code"] = r.get("code")
-                s["last_ms"] = r.get("latency")
-                if r["status"] == "ok":
-                    s["ok"] += 1
-                    if s["down_since"] is not None:
-                        s["downtime_s"] += int((now - s["down_since"]).total_seconds())
-                        s["down_since"] = None
-                else:
-                    if s["down_since"] is None:
-                        s["down_since"] = now
+    pool = ThreadPoolExecutor(max_workers=min(len(targets), 8))
+    try:
+        with Live(_make_table(), refresh_per_second=1, console=console) as live:
+            while True:
+                _monitor_http_cycle(pool, targets, stats)
                 live.update(_make_table())
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    _print_monitor_summary(stats)
 
-            for _ in range(interval):
-                if not running:
-                    break
-                time.sleep(1)
-            live.update(_make_table())
 
+def _monitor_http_cycle(pool, targets, stats) -> None:
+    """Check every target concurrently (one slow host no longer delays the
+    rest of the cycle) and fold the results into ``stats``."""
+    for t, r in zip(targets, pool.map(http_check, targets)):
+        s = stats[t]
+        now = datetime.now()
+        s["total"] += 1
+        s["last_checked"] = now
+        s["last_status"] = r["status"]
+        s["last_code"] = r.get("code")
+        s["last_ms"] = r.get("latency")
+        if r["status"] == "ok":
+            s["ok"] += 1
+            if s["down_since"] is not None:
+                s["downtime_s"] += int((now - s["down_since"]).total_seconds())
+                s["down_since"] = None
+        elif s["down_since"] is None:
+            s["down_since"] = now
+
+
+def _print_monitor_summary(stats: dict) -> None:
     console.print("\n[bold]Session summary[/bold]\n")
+    now = datetime.now()
     for t, s in stats.items():
         uptime = (s["ok"] / s["total"] * 100) if s["total"] else 100.0
         color = "green" if uptime == 100 else ("yellow" if uptime >= 95 else "red")
+        # Include an outage still in progress at Ctrl+C -- the live table
+        # counted it but the old summary dropped it.
         total_down = s["downtime_s"]
-        down_str = f"  downtime {_fmt_duration(total_down)}" if total_down else ""
+        if s["down_since"] is not None:
+            total_down += int((now - s["down_since"]).total_seconds())
+        down_str = f"  downtime {fmt_duration(total_down)}" if total_down else ""
         console.print(f"  [bold]{t}[/bold]  [{color}]{uptime:.1f}% uptime[/{color}]  "
                       f"({s['ok']}/{s['total']} checks){down_str}")
     console.print()
@@ -675,8 +557,7 @@ def speed(size, output_json):
     result = speed_check(size_mb=size)
 
     if output_json:
-        import json as _json
-        click.echo(_json.dumps(result, indent=2))
+        click.echo(json.dumps(result, indent=2))
         return
 
     if result["status"] == "ok":
@@ -778,8 +659,7 @@ def ssl(host, port, output_json):
     result = ssl_check(host, port=port)
 
     if output_json:
-        import json as _json
-        click.echo(_json.dumps(result, indent=2))
+        click.echo(json.dumps(result, indent=2))
         return
 
     if result["status"] == "fail":
@@ -805,18 +685,6 @@ def ssl(host, port, output_json):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _fmt_duration(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m {seconds % 60}s"
-    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
-
-
-# ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
 
@@ -827,12 +695,11 @@ def _fmt_duration(seconds: int) -> str:
 def report(target, last, output_json):
     """Summary report from saved check history (~/.nethealth/history.json)."""
     from nethealth.report import generate_report
-    import json as _json
 
     data = generate_report(target=target, last=last)
 
     if output_json:
-        click.echo(_json.dumps(data, indent=2))
+        click.echo(json.dumps(data, indent=2))
         return
 
     if data["status"] == "empty":
@@ -842,7 +709,7 @@ def report(target, last, output_json):
     dr = data["date_range"]
     console.print(f"\n[bold cyan]📊  nethealth report[/bold cyan]  [dim]{dr[0]} → {dr[1]}[/dim]  ({data['entries_total']} runs)\n")
 
-    for tgt, checks in data["per_target"].items():
+    for tgt, check_stats in data["per_target"].items():
         console.print(f"[bold]{tgt}[/bold]")
         table = Table(box=box.SIMPLE, show_header=True, header_style="dim", pad_edge=False)
         table.add_column("Check",     width=8)
@@ -852,7 +719,7 @@ def report(target, last, output_json):
         table.add_column("Min ms",    width=9)
         table.add_column("Max ms",    width=9)
 
-        for check_name, stats in checks.items():
+        for check_name, stats in check_stats.items():
             pct = stats["pass_pct"]
             pct_color = "green" if pct == 100 else ("yellow" if pct >= 80 else "red")
             avg = str(stats.get("avg_ms") or stats.get("avg_latency_ms") or "—")

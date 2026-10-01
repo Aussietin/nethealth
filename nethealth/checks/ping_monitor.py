@@ -1,41 +1,48 @@
 from __future__ import annotations
 
+import re
 import subprocess
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _log_name(target: str) -> str:
+    """Filesystem-safe, collision-free log name. The old `replace('.', '_')`
+    mapped `a.b` and `a_b` to the same file and left IPv6 colons in place."""
+    return "ping_" + re.sub(r"[^A-Za-z0-9-]", lambda m: f"_{ord(m.group()):x}_", target) + ".log"
+
+
 def _ping_target(target: str, log_file: IO[str]) -> bool:
-    """Internal helper to ping a single target and log it."""
-    timestamp = datetime.utcnow().isoformat(timespec="seconds")
+    """Ping ``target`` once and append one timestamped line to its log."""
+    timestamp = _utc_now()
     try:
         proc = subprocess.run(
             ["ping", "-c", "1", "-W", "1", target],
             capture_output=True,
             text=True,
+            timeout=3,  # -W bounds the reply wait, not DNS resolution
         )
-
-        if proc.returncode == 0:
-            # extract latency if present
-            latency_line = next(
-                (l for l in proc.stdout.splitlines() if "time=" in l), None
-            )
-            if latency_line:
-                # Typically format is "64 bytes from ...: icmp_seq=1 ttl=64 time=0.045 ms"
-                log_file.write(f"{timestamp} OK {latency_line.split('time=')[-1]}\n")
-            else:
-                log_file.write(f"{timestamp} OK\n")
-            return True
-        else:
-            log_file.write(f"{timestamp} TIMEOUT\n")
-            return False
     except Exception as e:
         log_file.write(f"{timestamp} ERROR {e}\n")
         return False
+
+    if proc.returncode != 0:
+        log_file.write(f"{timestamp} TIMEOUT\n")
+        return False
+
+    # Typically "64 bytes from ...: icmp_seq=1 ttl=64 time=0.045 ms"
+    latency_line = next((l for l in proc.stdout.splitlines() if "time=" in l), None)
+    suffix = f" {latency_line.split('time=')[-1]}" if latency_line else ""
+    log_file.write(f"{timestamp} OK{suffix}\n")
+    return True
 
 
 def monitor_ping(
@@ -45,62 +52,45 @@ def monitor_ping(
     log_dir: str = "nethealth-logs",
 ) -> bool:
     """
-    Long-running, concurrent, timestamped ping monitor.
+    Long-running, concurrent, timestamped ping monitor. Returns False if
+    the run was cut short by Ctrl-C.
     """
     Path(log_dir).mkdir(parents=True, exist_ok=True)
-    end_time = time.time() + duration
-    
-    start_ts = datetime.utcnow()
-    logs = {}
+    started = time.monotonic()
+    end_time = started + duration
     stats = {t: {"sent": 0, "received": 0} for t in targets}
-    
-    for t in targets:
-        safe = t.replace(".", "_")
-        logs[t] = open(Path(log_dir) / f"ping_{safe}.log", "a", buffering=1)
-        logs[t].write(f"# Started ping monitor at {start_ts.isoformat()} UTC\n")
-
-    stop_event = threading.Event()
     completed = True
 
-    print(f"📡 Monitoring {len(targets)} targets. Press Ctrl-C to stop.")
+    with ExitStack() as stack:
+        logs = {
+            t: stack.enter_context(open(Path(log_dir) / _log_name(t), "a", buffering=1, encoding="utf-8"))
+            for t in targets
+        }
+        for log in logs.values():
+            log.write(f"# Started ping monitor at {_utc_now()} UTC\n")
 
-    try:
-        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
-            while time.time() < end_time and not stop_event.is_set():
-                futures = []
-                for target in targets:
-                    stats[target]["sent"] += 1
-                    futures.append(executor.submit(_ping_target, target, logs[target]))
-                
-                # Wait for all pings in this interval to finish
-                for i, future in enumerate(futures):
-                    if future.result():
-                        stats[targets[i]]["received"] += 1
-                
-                # Sleep briefly if we have time left in the interval
-                # This is more responsive to Ctrl-C than a single long sleep
-                sleep_until = time.time() + interval
-                while time.time() < sleep_until and not stop_event.is_set():
-                    time.sleep(0.1)
-
-    except KeyboardInterrupt:
-        print("\n🛑 Interrupt received. Cleaning up...")
-        stop_event.set()
-        completed = False
-    finally:
-        end_ts = datetime.utcnow()
-        duration_actual = (end_ts - start_ts).total_seconds()
-        
-        print("\n--- Monitoring Summary ---")
-        print(f"Duration: {duration_actual:.1f}s")
-        for target, s in stats.items():
-            loss = 0
-            if s["sent"] > 0:
-                loss = (1 - s["received"] / s["sent"]) * 100
-            print(f"Target {target:15}: Sent={s['sent']}, Received={s['received']}, Loss={loss:.1f}%")
-            
-            logs[target].write(f"# Interrupted at {end_ts.isoformat()} UTC\n")
-            logs[target].write(f"# Summary: Sent={s['sent']}, Received={s['received']}, Loss={loss:.1f}%\n")
-            logs[target].close()
+        print(f"📡 Monitoring {len(targets)} targets. Press Ctrl-C to stop.")
+        try:
+            with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+                while time.monotonic() < end_time:
+                    cycle_start = time.monotonic()
+                    for t, ok in zip(targets, executor.map(lambda t: _ping_target(t, logs[t]), targets)):
+                        stats[t]["sent"] += 1
+                        stats[t]["received"] += ok
+                    # Interval is measured from the cycle start, so slow pings
+                    # don't stretch the sampling period.
+                    time.sleep(max(0.0, interval - (time.monotonic() - cycle_start)))
+        except KeyboardInterrupt:
+            print("\n🛑 Interrupt received. Cleaning up...")
+            completed = False
+        finally:
+            print("\n--- Monitoring Summary ---")
+            print(f"Duration: {time.monotonic() - started:.1f}s")
+            footer = "Interrupted" if not completed else "Finished"
+            for target, s in stats.items():
+                loss = (1 - s["received"] / s["sent"]) * 100 if s["sent"] else 0.0
+                print(f"Target {target:15}: Sent={s['sent']}, Received={s['received']}, Loss={loss:.1f}%")
+                logs[target].write(f"# {footer} at {_utc_now()} UTC\n")
+                logs[target].write(f"# Summary: Sent={s['sent']}, Received={s['received']}, Loss={loss:.1f}%\n")
 
     return completed

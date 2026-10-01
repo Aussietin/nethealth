@@ -3,6 +3,8 @@ nethealth/config.py — load ~/.nethealth/config.toml, create defaults on first 
 """
 from __future__ import annotations
 
+import copy
+import json
 import sys
 from pathlib import Path
 
@@ -71,16 +73,16 @@ def load_with_status() -> tuple[dict, str | None]:
     CONFIG_DIR.mkdir(exist_ok=True)
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(_DEFAULT)
-        return dict(_HARD_DEFAULTS), None
+        return copy.deepcopy(_HARD_DEFAULTS), None
 
     if tomllib is None:
-        return dict(_HARD_DEFAULTS), None
+        return copy.deepcopy(_HARD_DEFAULTS), None
 
     try:
         with open(CONFIG_PATH, "rb") as fh:
             return tomllib.load(fh), None
     except Exception as exc:  # malformed TOML, permissions, encoding, etc.
-        return dict(_HARD_DEFAULTS), f"{type(exc).__name__}: {exc}"
+        return copy.deepcopy(_HARD_DEFAULTS), f"{type(exc).__name__}: {exc}"
 
 
 def load() -> dict:
@@ -98,6 +100,15 @@ def alert_cfg() -> dict:
     return load().get("alerts", {})
 
 
+def _toml_str(value: str) -> str:
+    """Quote ``value`` as a TOML basic string. JSON string escaping is a
+    subset of TOML's, so json.dumps does the job. The old template pasted
+    values between bare quotes, so a `"` or `\\` in a URL or target wrote a
+    config file that no longer parsed (and then silently fell back to
+    defaults on the next load)."""
+    return json.dumps(value, ensure_ascii=False)
+
+
 def save(data: dict) -> None:
     """
     Write config back to CONFIG_PATH as TOML.
@@ -113,14 +124,14 @@ def save(data: dict) -> None:
     speed_    = data.get("speed", {})
 
     targets = defaults_.get("targets") or ["google.com", "1.1.1.1"]
-    targets_toml = "[" + ", ".join(f'"{t}"' for t in targets) + "]"
-    refresh_interval = defaults_.get("refresh_interval", 30)
+    targets_toml = "[" + ", ".join(_toml_str(str(t)) for t in targets) + "]"
+    refresh_interval = int(defaults_.get("refresh_interval", 30))
     enabled          = "true" if alerts_.get("enabled", True) else "false"
     desktop          = "true" if alerts_.get("desktop", True) else "false"
     webhook_url       = alerts_.get("webhook_url", "") or ""
     slack_webhook_url = alerts_.get("slack_webhook_url", "") or ""
     teams_webhook_url = alerts_.get("teams_webhook_url", "") or ""
-    size_mb = speed_.get("size_mb", 10)
+    size_mb = int(speed_.get("size_mb", 10))
 
     content = f"""\
 [defaults]
@@ -136,16 +147,18 @@ enabled = {enabled}
 desktop = {desktop}
 # Optional generic webhook URL — leave empty to disable.
 # nethealth will POST JSON: {{target, check, status, error, timestamp}}
-webhook_url = "{webhook_url}"
+webhook_url = {_toml_str(webhook_url)}
 # Optional Slack Incoming Webhook URL.
-slack_webhook_url = "{slack_webhook_url}"
+slack_webhook_url = {_toml_str(slack_webhook_url)}
 # Optional Microsoft Teams Incoming Webhook URL.
-teams_webhook_url = "{teams_webhook_url}"
+teams_webhook_url = {_toml_str(teams_webhook_url)}
 
 [speed]
 # Default download size in MB for nethealth speed.
 size_mb = {size_mb}
 """
-    CONFIG_DIR.mkdir(exist_ok=True)
-    CONFIG_PATH.write_text(content)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(CONFIG_PATH)
 

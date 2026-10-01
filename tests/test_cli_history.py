@@ -1,12 +1,11 @@
-"""Unit tests for nethealth/cli.py's _save_history JSON path: the entry cap
-and recovery from a corrupted history.json (both added in the robustness
-batch of round 2)."""
+"""History persistence through `check --save` (nethealth.report.record_check):
+the entry cap and recovery from a corrupted history.json."""
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from nethealth import cli as cli_mod
+from nethealth import report as report_mod
 
 _RESULTS = {
     "dns": {"status": "ok"},
@@ -16,39 +15,32 @@ _RESULTS = {
 }
 
 
-def test_save_history_json_caps_entries(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(cli_mod, "_MAX_HISTORY_ENTRIES", 3)
+def test_save_history_json_caps_entries(monkeypatch):
+    monkeypatch.setattr(report_mod, "MAX_HISTORY_ENTRIES", 3)
 
     for i in range(5):
         cli_mod._save_history(f"target{i}", _RESULTS, "json")
 
-    history_path = tmp_path / ".nethealth" / "history.json"
-    data = json.loads(history_path.read_text())
-    assert len(data) == 3
+    data = json.loads(report_mod.HISTORY_PATH.read_text())
     # Oldest entries dropped, most recent kept, in order.
     assert [e["target"] for e in data] == ["target2", "target3", "target4"]
 
 
-def test_save_history_json_recovers_from_corrupt_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    history_dir = tmp_path / ".nethealth"
-    history_dir.mkdir()
-    (history_dir / "history.json").write_text("not json {{{")
+def test_save_history_json_moves_corrupt_file_aside():
+    path = report_mod.HISTORY_PATH
+    path.write_text("not json {{{")
 
-    path = cli_mod._save_history("target0", _RESULTS, "json")
+    cli_mod._save_history("target0", _RESULTS, "json")
     data = json.loads(path.read_text())
-    assert len(data) == 1
-    assert data[0]["target"] == "target0"
+    assert [e["target"] for e in data] == ["target0"]
+    # The unreadable original is kept, not overwritten.
+    aside = list(path.parent.glob("history.json.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "not json {{{"
 
 
-def test_save_history_json_recovers_from_non_list_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    history_dir = tmp_path / ".nethealth"
-    history_dir.mkdir()
-    (history_dir / "history.json").write_text('{"not": "a list"}')
+def test_save_history_json_recovers_from_non_list_root():
+    report_mod.HISTORY_PATH.write_text('{"not": "a list"}')
 
-    path = cli_mod._save_history("target0", _RESULTS, "json")
-    data = json.loads(path.read_text())
-    assert isinstance(data, list)
-    assert len(data) == 1
+    cli_mod._save_history("target0", _RESULTS, "json")
+    data = json.loads(report_mod.HISTORY_PATH.read_text())
+    assert isinstance(data, list) and len(data) == 1

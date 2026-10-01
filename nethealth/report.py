@@ -1,5 +1,10 @@
+from __future__ import annotations
+
+import csv
 import json
-from collections import defaultdict
+import os
+import threading
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,34 +33,63 @@ def _make_sparkline(booleans: list[bool]) -> str:
     return "".join(_SPARK_OK if b else _SPARK_FAIL for b in booleans)
 
 
+# The TUI records from one worker thread per target, so concurrent writers are
+# the normal case. Read-modify-write without this lock lost entries.
+_HISTORY_LOCK = threading.Lock()
+
+
 def record_check(target: str, results: dict, path: Path | None = None) -> Path:
     """Append one check snapshot to history.json, trimming to MAX_HISTORY_ENTRIES.
 
-    A corrupt/unreadable history file is not fatal -- it's replaced with a
-    fresh list (the old bytes are left on disk untouched by not reading further).
+    The write is atomic (temp file + replace), so a crash mid-write can't
+    truncate the history. A corrupt/unreadable file is moved aside to
+    ``history.json.corrupt-<timestamp>`` rather than overwritten -- the old
+    code's docstring promised it was left alone, but it was clobbered.
     Returns the path written.
     """
     path = path or HISTORY_PATH
-    path.parent.mkdir(exist_ok=True)
-
-    history: list[dict] = []
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text())
-            if isinstance(loaded, list):
-                history = loaded
-        except Exception:
-            history = []
-
+    path.parent.mkdir(parents=True, exist_ok=True)
     trimmed = {k: results[k] for k in _RECORDED_CHECKS if k in results}
-    history.append({
-        "timestamp": datetime.now().isoformat(),
-        "target": target,
-        "results": trimmed,
-    })
-    if len(history) > MAX_HISTORY_ENTRIES:
+    entry = {"timestamp": datetime.now().isoformat(), "target": target, "results": trimmed}
+
+    with _HISTORY_LOCK:
+        history: list[dict] = []
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(loaded, list):
+                    raise ValueError("history root is not a list")
+                history = loaded
+            except Exception:
+                stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+                path.replace(path.with_name(f"{path.name}.corrupt-{stamp}"))
+
+        history.append(entry)
         history = history[-MAX_HISTORY_ENTRIES:]
-    path.write_text(json.dumps(history, indent=2))
+        tmp = path.with_name(f"{path.name}.tmp")
+        tmp.write_text(json.dumps(history, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    return path
+
+
+def record_check_csv(target: str, results: dict, path: Path) -> Path:
+    """Append one row per check to a CSV history file (`check --save csv`)."""
+    from nethealth.formatting import LABELS, detail
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().isoformat()
+    rows = [
+        {"timestamp": ts, "target": target, "check": LABELS[name],
+         "status": results[name]["status"], "detail": detail(name, results[name])}
+        for name in _RECORDED_CHECKS if name in results
+    ]
+    with _HISTORY_LOCK:
+        write_header = not path.exists()
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["timestamp", "target", "check", "status", "detail"])
+            if write_header:
+                writer.writeheader()
+            writer.writerows(rows)
     return path
 
 
@@ -69,9 +103,10 @@ def _load_history(path: Path | None = None) -> list[dict]:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text())
+        loaded = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
+    return loaded if isinstance(loaded, list) else []
 
 
 def generate_report(target: str | None = None, last: int | None = None) -> dict:
@@ -146,7 +181,6 @@ def generate_report(target: str | None = None, last: int | None = None) -> dict:
                 codes = [v.get("code") for v in values if v.get("status") == "ok" and v.get("code")]
                 lats = [v["latency"] for v in values if v.get("status") == "ok" and "latency" in v]
                 if codes:
-                    from collections import Counter
                     entry["common_codes"] = dict(Counter(codes).most_common(3))
                 if lats:
                     entry["avg_latency_ms"] = round(sum(lats) / len(lats), 1)

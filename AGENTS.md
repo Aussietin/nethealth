@@ -4,7 +4,7 @@ nethealth — network diagnostic TUI (traceroute, packet sniffer, gateway/IP che
 
 - **Stack:** Python, Click, Rich, Textual
 - **Vault note:** `ProjectVault/01_Repositories/nethealth.md` — read it for current status, history, and open loops before non-trivial work. It is canonical over anything stale here.
-- **Runtime preflight:** python + pip; pytest (125 tests)
+- **Runtime preflight:** python + pip; pytest (184 tests, ~30 s in WSL)
 - **Deploy:** none — local CLI/TUI
 
 ## Operating contract (Claude Code + Codex)

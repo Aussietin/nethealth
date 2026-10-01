@@ -12,6 +12,8 @@ from pathlib import Path
 from click.testing import CliRunner
 
 import nethealth.cli as cli_mod
+from nethealth import checks, formatting
+from nethealth import report as report_mod
 from nethealth.cli import cli
 
 _OK_RESULTS = {
@@ -30,42 +32,40 @@ _FAIL_RESULTS = {
 
 
 def _patch_checks(monkeypatch, results: dict, traceroute: dict | None = None):
-    monkeypatch.setattr(cli_mod, "dns_check", lambda t: results["dns"])
-    monkeypatch.setattr(cli_mod, "ping_check", lambda t: results["ping"])
-    monkeypatch.setattr(cli_mod, "http_check", lambda t: results["http"])
-    monkeypatch.setattr(cli_mod, "port_check", lambda t: results["port"])
+    for name in ("dns", "ping", "http", "port"):
+        monkeypatch.setitem(checks.TARGET_CHECKS, name, lambda t, r=results[name]: r)
     if traceroute is not None:
-        monkeypatch.setattr(cli_mod, "traceroute_check", lambda t, max_hops=15: traceroute)
+        monkeypatch.setitem(checks.TARGET_CHECKS, "traceroute", lambda t: traceroute)
 
 
 # ── formatters (pure functions) ──────────────────────────────────────────
 
 def test_fmt_dns_ok():
-    assert "12.3" in cli_mod._fmt_dns({"status": "ok", "latency": 12.3})
+    assert "12.3" in formatting.fmt_dns({"status": "ok", "latency": 12.3})
 
 
 def test_fmt_dns_fail():
-    assert cli_mod._fmt_dns({"status": "fail", "error": "timeout"}) == "timeout"
+    assert formatting.fmt_dns({"status": "fail", "error": "timeout"}) == "timeout"
 
 
 def test_fmt_ping_ok():
-    assert "8.1" in cli_mod._fmt_ping({"status": "ok", "avg_ms": 8.1})
+    assert "8.1" in formatting.fmt_ping({"status": "ok", "avg_ms": 8.1})
 
 
 def test_fmt_http_ok():
-    label = cli_mod._fmt_http({"status": "ok", "code": 200, "latency": 55.0})
+    label = formatting.fmt_http({"status": "ok", "code": 200, "latency": 55.0})
     assert "200" in label
     assert "55" in label
 
 
 def test_fmt_port_open():
-    label = cli_mod._fmt_port({"results": [{"port": 443, "status": "open"}, {"port": 22, "status": "closed"}]})
+    label = formatting.fmt_port({"results": [{"port": 443, "status": "open"}, {"port": 22, "status": "closed"}]})
     assert "443" in label
     assert "22" not in label
 
 
 def test_fmt_port_all_closed():
-    label = cli_mod._fmt_port({"results": [{"port": 22, "status": "closed"}]})
+    label = formatting.fmt_port({"results": [{"port": 22, "status": "closed"}]})
     assert "closed" in label
 
 
@@ -84,7 +84,7 @@ def test_check_command_all_passing(monkeypatch):
 
 
 def test_check_command_some_failing(monkeypatch):
-    _patch_checks(monkeypatch, _FAIL_RESULTS, traceroute={"status": "fail", "message": "no route"})
+    _patch_checks(monkeypatch, _FAIL_RESULTS, traceroute={"status": "fail", "error": "no route"})
     result = CliRunner().invoke(cli, ["check", "example.com"])
     assert result.exit_code == 0
     assert "0/5" in result.output
@@ -119,11 +119,10 @@ def test_check_command_json_output_multi_target(monkeypatch):
 
 
 def test_check_command_save_json(monkeypatch, tmp_path):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     _patch_checks(monkeypatch, _OK_RESULTS, traceroute={"status": "ok", "hops": []})
     result = CliRunner().invoke(cli, ["check", "example.com", "--save", "json", "--skip-traceroute"])
     assert result.exit_code == 0
-    history_path = tmp_path / ".nethealth" / "history.json"
+    history_path = report_mod.HISTORY_PATH
     assert history_path.exists()
     data = json.loads(history_path.read_text())
     assert data[0]["target"] == "example.com"
@@ -138,11 +137,10 @@ def test_check_command_multi_target_table_output(monkeypatch):
 
 
 def test_check_command_save_csv(monkeypatch, tmp_path):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     _patch_checks(monkeypatch, _OK_RESULTS, traceroute={"status": "ok", "hops": []})
     result = CliRunner().invoke(cli, ["check", "example.com", "--save", "csv", "--skip-traceroute"])
     assert result.exit_code == 0
-    csv_path = tmp_path / ".nethealth" / "history.csv"
+    csv_path = report_mod.HISTORY_PATH.with_suffix(".csv")
     assert csv_path.exists()
     content = csv_path.read_text()
     assert "example.com" in content

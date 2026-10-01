@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from click.testing import CliRunner
 
+from nethealth import checks
 from nethealth.cli import cli
 from nethealth.diagnose import diagnose, OK, WARN, DOWN
 
@@ -81,9 +82,9 @@ def _patch_checks(monkeypatch, *, gw=OK_GW, dns=OK_DNS, ping=OK_PING, http=OK_HT
     import nethealth.cli as cli_mod
     import nethealth.checks.gateway as gw_mod
     monkeypatch.setattr(gw_mod, "gateway_check", lambda: gw)
-    monkeypatch.setattr(cli_mod, "dns_check", lambda t: dns)
-    monkeypatch.setattr(cli_mod, "ping_check", lambda t: ping)
-    monkeypatch.setattr(cli_mod, "http_check", lambda t: http)
+    monkeypatch.setitem(checks.TARGET_CHECKS, "dns", lambda t: dns)
+    monkeypatch.setitem(checks.TARGET_CHECKS, "ping", lambda t: ping)
+    monkeypatch.setitem(checks.TARGET_CHECKS, "http", lambda t: http)
 
 
 def test_status_command_healthy(monkeypatch):
@@ -109,11 +110,11 @@ def test_status_json_output(monkeypatch):
 
 def test_check_prints_plain_language_verdict(monkeypatch):
     import nethealth.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "dns_check", lambda t: OK_DNS)
-    monkeypatch.setattr(cli_mod, "ping_check", lambda t: OK_PING)
-    monkeypatch.setattr(cli_mod, "http_check", lambda t: {"status": "fail", "error": "boom"})
-    monkeypatch.setattr(cli_mod, "port_check", lambda t: {"status": "ok", "results": []})
-    monkeypatch.setattr(cli_mod, "traceroute_check", lambda t, **k: {"status": "ok", "hops": []})
+    monkeypatch.setitem(checks.TARGET_CHECKS, "dns", lambda t: OK_DNS)
+    monkeypatch.setitem(checks.TARGET_CHECKS, "ping", lambda t: OK_PING)
+    monkeypatch.setitem(checks.TARGET_CHECKS, "http", lambda t: {"status": "fail", "error": "boom"})
+    monkeypatch.setitem(checks.TARGET_CHECKS, "port", lambda t: {"status": "ok", "results": []})
+    monkeypatch.setitem(checks.TARGET_CHECKS, "traceroute", lambda t: {"status": "ok", "hops": []})
     result = CliRunner().invoke(cli, ["check", "example.com"])
     assert result.exit_code == 0
     assert "example.com isn't responding" in result.output
