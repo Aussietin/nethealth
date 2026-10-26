@@ -1,5 +1,7 @@
 # nethealth
 
+![nethealth: six services listed as ok, pending or down](docs/social-card.png)
+
 A personal network health diagnostic tool for the terminal. Run one-shot checks, get a live monitoring TUI, test your download speed, and generate reports — no browser, no server, no setup friction.
 
 ```
